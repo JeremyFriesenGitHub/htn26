@@ -213,7 +213,9 @@ function parseTs(s){ // "13/Mar/2026:23:10:19 -0400"
   const [,dd,mon,yyyy,HH,MM,SS,sg,oh,om]=m;
   const off=(sg==="-"?-1:1)*(+oh*60+ +om)*60000;
   const utc=Date.UTC(+yyyy,MONTHS[mon],+dd,+HH,+MM,+SS)-off;
-  return {epoch:Math.floor((utc)/1000), ms:utc, hour:+HH, day:`${yyyy}-${String(MONTHS[mon]+1).padStart(2,"0")}-${dd}`};
+  const day=`${yyyy}-${String(MONTHS[mon]+1).padStart(2,"0")}-${dd}`;
+  return {epoch:Math.floor((utc)/1000), ms:utc, hour:+HH, day,
+          disp:`${day} ${HH}:${MM}:${SS}`, tz:`${sg}${oh}${om}`};
 }
 function parseLine(line){
   const m=line.trim().match(RX); if(!m)return null;
@@ -221,7 +223,7 @@ function parseLine(line){
   const t=parseTs(ts); if(!t)return null;
   const tmpl=template(path), key=method+" "+tmpl;
   return {raw:line.trim(),ip,user,ts,method,path,tmpl,key,status:+status,
-    bytes:bytes==="-"?0:+bytes, epoch:t.epoch,ms:t.ms,hour:t.hour,day:t.day};
+    bytes:bytes==="-"?0:+bytes, epoch:t.epoch,ms:t.ms,hour:t.hour,day:t.day,disp:t.disp,tz:t.tz};
 }
 function rollingFails(rows){ // fails_60s per (ip,user) among 401s
   const w=MODEL.burst_windows.fails_60s, by={};
@@ -368,12 +370,12 @@ function render(){
   const slice=rows.slice(PAGE*PER,PAGE*PER+PER);
   $("#tbody").innerHTML = slice.length? slice.map(r=>{
     const w=Math.max(3,Math.min(100,r.risk*100));
-    const time=new Date(r.ms).toISOString().replace("T"," ").slice(0,19);
+    const time=r.disp;
     return `<tr class="t-${r.tier}">
       <td><span class="tdot"></span></td>
       <td><div class="score-cell"><span>${fmtScore(r.score)}</span><span class="bar"><i style="width:${w}%"></i></span></div></td>
       <td class="mono" style="white-space:nowrap">${time}</td>
-      <td>${r.user}</td><td class="mono">${r.ip}</td>
+      <td style="white-space:nowrap">${r.user}</td><td class="mono" style="white-space:nowrap">${r.ip}</td>
       <td class="mono">${esc(r.method)} ${esc(r.path)}</td>
       <td>${r.status}</td>
       <td><div class="reasons">${r.reasons.map(x=>`<span class="rtag">${x}</span>`).join("")}</div></td>
@@ -418,15 +420,19 @@ function drawUserBars(){
     .sort((a,b)=>b.flagged-a.flagged||b.total-a.total).slice(0,8);
   if(!users.length)return;
   const W_=560,H=240,L=88,R=40,T=8,B=20,iw=W_-L-R,ih=H-T-B;
-  const max=Math.max(...users.map(u=>u.total),1), x=v=>v/max*iw, gap=ih/users.length, bh=Math.min(22,gap*.6);
+  users=users.filter(u=>u.flagged>0).slice(0,8);
+  if(!users.length){const t=el("text",{x:W_/2,y:H/2,"text-anchor":"middle",class:"tick"});t.textContent="no flagged lines in view";svg.append(t);return;}
+  const max=Math.max(...users.map(u=>u.flagged),1), x=v=>v/max*iw, gap=ih/users.length, bh=Math.min(22,gap*.6);
   users.forEach((u,i)=>{
     const cy=T+gap*i+gap/2;
     const nm=el("text",{x:L-10,y:cy+4,"text-anchor":"end",class:"tick",fill:"var(--text-primary)"});nm.textContent=u.u;svg.append(nm);
     let xx=L;
-    [["red",u.red],["yellow",u.yellow],["green",u.green]].forEach(([c,n])=>{ if(!n)return;
-      const w=x(n); svg.append(el("rect",{x:xx,y:cy-bh/2,width:Math.max(0,w-1),height:bh,rx:2,fill:`var(--${c})`,opacity:c==="green"?.35:.95}));
-      xx+=w; });
-    const fl=el("text",{x:xx+6,y:cy+4,class:"tick",fill:"var(--text-primary)"});fl.textContent=u.flagged?`${u.flagged} flagged`:"";svg.append(fl);
+    [["red",u.red],["yellow",u.yellow]].forEach(([c,n])=>{ if(!n)return;
+      const w=x(n); const rect=el("rect",{x:xx,y:cy-bh/2,width:Math.max(1,w-1),height:bh,rx:2,fill:`var(--${c})`});
+      rect.addEventListener("mousemove",e=>showTT(`<b>${u.u}</b><br><span class="m">${n} ${c==="red"?"anomalies":"suspicious"} of ${u.total} lines</span>`,e.clientX,e.clientY));
+      rect.addEventListener("mouseleave",hideTT); svg.append(rect); xx+=w; });
+    const fl=el("text",{x:xx+6,y:cy+4,class:"tick",fill:"var(--text-primary)"});
+    fl.textContent=`${u.flagged} of ${u.total}`;svg.append(fl);
   });
 }
 
