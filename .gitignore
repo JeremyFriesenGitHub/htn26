@@ -16,4 +16,5 @@ results/
 # tooling
 .claude
 
+# local / unrelated
 test.py
