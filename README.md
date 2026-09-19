@@ -131,6 +131,45 @@ bench/aggregate.py      merge benchmark + LLM results into one leaderboard
 ```
 
 ## Usage
+
+### Local dashboard
+
+```bash
+python3 -m bench.dashboard
+```
+
+Open **http://127.0.0.1:8765** for the log-review dashboard. Python 3.9+ is enough to
+explore the included synthetic sample; no frontend build or additional packages
+are needed. Use `--port 8766` to choose another port.
+
+- Upload a `.log` / `.txt` file, drag and drop it, or paste Apache Common or
+  Combined Log Format lines. There is no application-level file-size or total-line
+  limit; available memory determines how large a batch can be processed.
+- Review flagged requests first, adjust the score cutoff, filter by source IP,
+  search, sort scores, and inspect explanations alongside nearby requests from
+  the same IP and user. The chart shows when flagged requests occurred.
+- Export the currently filtered results as CSV, including the model, score type,
+  cutoff, original line number, and whether the input was synthetic.
+- The **heuristic preview** works immediately using fixed request indicators and
+  earlier failed logins from the same IP/user. It is not a trained detector and
+  does not learn user permission profiles. Use **Try sample logs** to explore a
+  synthetic example; the dashboard does not load sample data automatically.
+- **GMM** and **Deep autoencoder** become selectable when their dependencies and
+  saved artifacts under `results/model_store/` are available. Train them using
+  the commands below, then start the dashboard with that environment's Python:
+  `.venv/bin/python -m bench.dashboard`.
+
+Trained scores are **percentiles within the uploaded batch**, not attack
+probabilities. The review threshold defaults to 98/100 for trained models and
+75/100 for the heuristic preview. Explanation tags describe request features;
+they are not model attribution. Uploads are processed in memory on the local
+server and are not written to disk or sent to an external LLM. The server binds
+to `127.0.0.1` by default and is intended for local use.
+
+Run the dashboard backend checks with `python3 -m unittest discover -s tests -v`.
+
+### Training and benchmarks
+
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 # for GPU: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
