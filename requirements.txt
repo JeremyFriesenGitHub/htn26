@@ -1,0 +1,17 @@
+# Core benchmark (CPU-only is enough for every detector except the deep AE)
+numpy==2.5.3
+pandas==3.0.6
+scikit-learn==1.9.1
+scipy==1.18.1
+pyod==3.6.6
+pyarrow==25.0.1
+tqdm==4.70.1
+
+# Deep autoencoder (GPU). For CUDA 12.4:
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# CPU-only also works (slower):  pip install torch==2.6.0
+torch==2.6.0
+
+# LLM baselines (optional; needs a funded key in .keys.env)
+anthropic==1.7.0
+openai==3.16.2
