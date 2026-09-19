@@ -45,6 +45,20 @@ failed logins) so naive rules drown in false positives.
 | GPT-5 (blind LLM) | — | 0.324 | — | 10/22 | recall 0.77, precision 0.07, $4.72/run |
 | KMeans | RAW | 0.646 | — | 16/22 | same algorithm, naive features |
 
+### Hybrid: detector shortlist → LLM triage (recommended production design)
+
+| Approach | Precision | Recall | False positives | Cost/run | Alerts/day |
+|---|---|---|---|---|---|
+| Raw GPT-5 (blind, all lines) | 0.07 | 0.77 | 225 | $4.72 | — |
+| GMM alone (op threshold) | 0.20 | 0.91 | 78 | $0 | ~2.5 |
+| **Hybrid (GMM → GPT-5, top-60)** | **1.00** | **0.86** | **0** | **$0.08** | **0.6** |
+
+The detector scores every line cheaply; the LLM adjudicates only the top-K candidates **with
+each user's learned permission profile** (usual IPs, normally-accessed/denied resources) —
+the context raw GPT lacked. That removes every false positive and costs 60× less (it never
+sees the bulk of the log). Its 3 misses are the two context-only rows and one benign-looking
+CSRF-chain step the LLM reasonably cleared.
+
 **Takeaways**
 1. *Representation beats algorithm.* The CTX features lift every clusterer (KMeans
    0.65→0.84, GMM 0.61→0.91, OneClassSVM 0.57→0.86). K-means/SVM weren't the wrong idea —
@@ -60,8 +74,8 @@ failed logins) so naive rules drown in false positives.
 
 ## Usage
 ```bash
-uv venv .venv && uv pip install --python .venv/bin/python numpy pandas scikit-learn scipy pyod
-uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu124
+uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
+# for GPU: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
 .venv/bin/python -m bench.run_models       # full detector benchmark (both views, 3 seeds)
 .venv/bin/python -m bench.evaluate_final   # rigorous val-selected, bootstrapped final eval
@@ -69,6 +83,8 @@ uv pip install --python .venv/bin/python torch --index-url https://download.pyto
 .venv/bin/python -m bench.predict --demo --model ae --top 20   # score logs, with reasons
 .venv/bin/python -m bench.predict --input newlogs.txt --model gmm
 
-# LLM baseline (needs a funded key in .keys.env):
+# LLM baseline + hybrid (need a funded key in .keys.env; source it first:
+#   set -a && . ./.keys.env && set +a)
 .venv/bin/python -m bench.llm_baseline --provider openai --openai-model gpt-5
+.venv/bin/python -m bench.hybrid --model gmm --topk 60 --llm gpt-5
 ```
