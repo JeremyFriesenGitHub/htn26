@@ -278,12 +278,18 @@ def score_rules(records):
     return sorted(rows, key=lambda row: (-row["score"], row["id"]))
 
 
-CALIBRATION_QUANTILES = 1001
 CALIBRATION_LOCK = threading.Lock()
 _CALIBRATION = {}
 # A calibrated score is the fraction of TRAINING traffic that scored lower, so
-# 0.999 reads "more unusual than 99.9% of normal activity" regardless of model.
-TIER_THRESHOLDS = {"yellow": 0.99, "red": 0.999}
+# 0.99999 reads "more unusual than 99.999% of normal activity". The grid is dense
+# in the tail because that is the only part that decides an alert: a coarse grid
+# saturates at 1.0 and hundreds of ordinary lines tie there.
+CALIBRATION_LEVELS = None  # built lazily by _levels()
+# One tier. A percentile cutoff flags a fixed FRACTION of whatever is uploaded
+# (99% of 180k lines is ~1,800 alerts), so the bar sits where clean training
+# traffic essentially never reaches: ~22 alerts across the whole 180k corpus.
+RED_THRESHOLD = 0.99999
+TIER_THRESHOLDS = {"red": RED_THRESHOLD}
 
 
 def calibration(model):
@@ -298,13 +304,15 @@ def calibration(model):
     with CALIBRATION_LOCK:
         if model in _CALIBRATION:
             return _CALIBRATION[model]
-        cache = STORE / ("calibration_%s.json" % model)
+        cache = STORE / ("calibration2_%s.json" % model)
         grid = None
         if cache.is_file():
             try:
                 loaded = json.loads(cache.read_text())
-                if isinstance(loaded, list) and len(loaded) > 1:
-                    grid = [float(v) for v in loaded]
+                if (isinstance(loaded, dict) and loaded.get("levels")
+                        and len(loaded["levels"]) == len(loaded.get("values", []))):
+                    grid = {"levels": [float(v) for v in loaded["levels"]],
+                            "values": [float(v) for v in loaded["values"]]}
             except (OSError, ValueError, TypeError):
                 grid = None
         if grid is None:
@@ -327,8 +335,8 @@ def _build_calibration(model):
         frame = frame[frame.ts < data_module.VAL_END]
         if not len(frame):
             return None
-        if len(frame) > 60000:
-            frame = frame.iloc[np.random.default_rng(0).choice(len(frame), 60000, replace=False)]
+        # No subsampling: the alert bar sits at the 99.999th percentile, and a
+        # sample blurs exactly the tail that decides it.
         scored = predict.score_frame(frame.sort_values("ts").reset_index(drop=True), model=model)
         if "score_raw" not in scored:
             return None
@@ -336,27 +344,32 @@ def _build_calibration(model):
         raw = raw[np.isfinite(raw)]
         if raw.size < 100:
             return None
-        return [float(v) for v in np.quantile(raw, np.linspace(0, 1, CALIBRATION_QUANTILES))]
+        levels = np.unique(np.concatenate([
+            np.linspace(0.0, 0.99, 400),
+            np.linspace(0.99, 0.999, 200),
+            np.linspace(0.999, 0.9999, 200),
+            np.linspace(0.9999, 1.0, 200)]))
+        return {"levels": [float(v) for v in levels],
+                "values": [float(v) for v in np.quantile(raw, levels)]}
     except Exception:
         return None  # calibration is an enhancement; scoring still works without it
 
 
 def calibrated_score(grid, raw):
     """Fraction of the training distribution at or below `raw`, in [0, 1]."""
-    low, high = 0, len(grid)
+    values, levels = grid["values"], grid["levels"]
+    low, high = 0, len(values)
     while low < high:
         mid = (low + high) // 2
-        if grid[mid] <= raw:
+        if values[mid] <= raw:
             low = mid + 1
         else:
             high = mid
-    return min(1.0, max(0.0, low / (len(grid) - 1)))
+    return float(levels[min(low, len(levels) - 1)]) if low else 0.0
 
 
 def tier_for(score):
-    if score >= TIER_THRESHOLDS["red"]:
-        return "red"
-    return "yellow" if score >= TIER_THRESHOLDS["yellow"] else "green"
+    return "red" if score >= RED_THRESHOLD else "green"
 
 
 def score_trained(records, model):
@@ -388,6 +401,7 @@ def score_trained(records, model):
             raise APIError("The saved model returned invalid results. Check or regenerate the model store.", 503)
         seen.add(source_id)
         tier = None
+        raw = None
         if grid:
             raw = float(row["score_raw"])
             if not math.isfinite(raw):
@@ -396,10 +410,17 @@ def score_trained(records, model):
             tier = tier_for(score)
         tags = str(row["reasons"])
         reasons = [tag for tag in tags.split(",") if tag and tag != "-"]
-        result.append(originals[source_id].public(score, reasons, tier))
+        public = originals[source_id].public(score, reasons, tier)
+        # Calibrated scores saturate at 1.0, so many lines tie there. Order by the
+        # raw score or the worst offenders hide behind whichever tied line is first.
+        public["_raw"] = raw if raw is not None else score
+        result.append(public)
     if len(result) != len(records):
         raise APIError("The saved model returned incomplete results. Check or regenerate the model store.", 503)
-    return sorted(result, key=lambda row: (-row["score"], row["id"]))
+    result.sort(key=lambda row: (-row["_raw"], row["id"]))
+    for row in result:
+        row.pop("_raw", None)
+    return result
 
 
 _PROFILES = {}
@@ -481,18 +502,64 @@ def score_hybrid(records):
         reason = str(verdict.get("reason", "")).strip()
         if verdict.get("is_incident"):
             confirmed += 1
-            target["score"] = max(target["score"], 0.999)
+            target["score"] = max(target["score"], RED_THRESHOLD)
             target["tier"] = "red"
             target["reasons"] = target["reasons"] + (["LLM: " + reason] if reason else [])
         else:
             target["score"] = min(target["score"], 0.98)
             target["tier"] = "green"
             target["reasons"] = target["reasons"] + (["LLM cleared: " + reason] if reason else [])
-    # anything the LLM never saw stays below the review cutoff
+    # anything the LLM never saw is not an alert
     for row in rows[len(shortlist):]:
         row["score"] = min(row["score"], 0.98)
-        row["tier"] = tier_for(row["score"]) if row["score"] < 0.99 else "yellow"
-    return sorted(rows, key=lambda row: (-row["score"], row["id"])), confirmed, len(shortlist)
+        row["tier"] = "green"
+    return rows, confirmed, len(shortlist)
+
+
+_KNOWN = {}
+
+
+def known_actors():
+    """Users and IPs present in the training window, for an out-of-domain check."""
+    if "k" in _KNOWN:
+        return _KNOWN["k"]
+    with CALIBRATION_LOCK:
+        if "k" in _KNOWN:
+            return _KNOWN["k"]
+        users, ips = set(), set()
+        try:
+            from . import predict
+            encoder = predict.load_encoder()
+            for user, ip in getattr(encoder, "seen_user_ip", ()):
+                users.add(user); ips.add(ip)
+        except Exception:
+            pass
+        _KNOWN["k"] = (users, ips)
+        return _KNOWN["k"]
+
+
+def domain_note(records, flagged_share):
+    """Warn when the upload does not look like the traffic the model learned.
+
+    These models learn one organisation's habits. Point them at another system's
+    logs and every line is legitimately novel, so everything scores high - which
+    is useless rather than wrong. Say so instead of presenting 100% as a result.
+    """
+    users, ips = known_actors()
+    if not users:
+        return None
+    unknown = sum(1 for r in records if r.user not in users and r.ip not in ips)
+    share = unknown / len(records)
+    if share >= 0.5:
+        return ("%.0f%% of these requests come from users or addresses the model has never "
+                "seen, so almost everything looks novel to it. These trained models only "
+                "apply to the system they were trained on - use Heuristic preview for "
+                "unfamiliar logs." % (share * 100))
+    if flagged_share >= 0.2:
+        return ("%.0f%% of this upload was flagged. That usually means the log does not "
+                "resemble the training traffic; treat the ranking as relative, not as "
+                "%d separate incidents." % (flagged_share * 100, int(flagged_share * len(records))))
+    return None
 
 
 def predict_payload(payload):
@@ -513,14 +580,17 @@ def predict_payload(payload):
             raise
         except Exception:
             raise APIError("LLM triage could not complete. Check OPENAI_API_KEY and connectivity.", 503) from None
+        hybrid_warning = domain_note(records, confirmed / max(len(rows), 1))
         return {"model": model, "model_name": MODEL_NAMES[model], "mode": "trained",
                 "score_kind": "triaged", "external": True,
+                **({"warning": hybrid_warning} if hybrid_warning else {}),
                 "notice": ("The GMM ranked every line locally; the top %d were sent to OpenAI for "
                            "review with each user's normal-access profile. %d were confirmed and "
                            "appear in the review queue; the rest were cleared. Log lines left this "
                            "machine for that step." % (reviewed, confirmed)),
                 "tiers": dict(TIER_THRESHOLDS),
                 "elapsed_ms": round((time.perf_counter() - start) * 1000, 2), "rows": rows}
+    warning = None
     if model == "rules":
         rows = score_rules(records)
         notice = ("Heuristic preview uses fixed request rules and earlier same-IP/user login failures "
@@ -538,6 +608,7 @@ def predict_payload(payload):
             raise APIError("The saved model could not score this upload. Check that its artifacts "
                            "match the installed dependencies, or regenerate them with python -m bench.train.", 503) from None
         calibrated = bool(rows) and "tier" in rows[0]
+        warning = domain_note(records, sum(1 for r in rows if r.get("tier") == "red") / max(len(rows), 1))
         if calibrated:
             notice = ("Scores are calibrated against the training baseline: 0.990 means more unusual "
                       "than 99% of normal traffic. They measure how unusual a request is for that "
@@ -554,6 +625,8 @@ def predict_payload(payload):
                "rows": rows}
     if model != "rules" and calibrated:
         payload["tiers"] = dict(TIER_THRESHOLDS)
+    if model != "rules" and warning:
+        payload["warning"] = warning
     return payload
 
 

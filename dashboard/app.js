@@ -17,7 +17,7 @@ const dayLabel = (time) => dateFormat(time, {month:"short", day:"numeric"});
 const timeLabel = (time) => dateFormat(time, {hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23"});
 const state = {
   ready:false, busy:false, reading:false, revision:0, inputMode:"file", file:null, models:[],
-  run:null, source:"", synthetic:false, threshold:0.75, filter:"flagged", query:"", sourceFilter:"",
+  run:null, source:"", synthetic:false, threshold:0.75, filter:"flagged", query:"", sourceFilter:"", userFilter:"",
   descending:true, page:1, pageSize:12, rowsById:new Map(), flagged:[], minTime:0, maxTime:0,
 };
 const humanReason = (reason) => {
@@ -32,8 +32,8 @@ const humanReason = (reason) => {
   };
   return known[reason] || reason.replace(/-/g," ").replace(/60s/g,"60 seconds");
 };
-const isFlagged = (row) => row.score >= state.threshold;
-const scoreChip = (row) => `<span class="score-chip ${row.tier ? `tier-${row.tier}` : ""} ${isFlagged(row) ? "flagged" : ""}">${(row.score * 100).toFixed(1)}</span>`;
+const isFlagged = (row) => row.tier ? row.tier === "red" : row.score >= state.threshold;
+const scoreChip = (row) => `<span class="score-chip ${isFlagged(row) ? "flagged" : ""}">${(row.score * 100).toFixed(2)}</span>`;
 
 async function api(path, options = {}) {
   let response;
@@ -123,19 +123,21 @@ async function analyze(logs, model, source, synthetic = false) {
     state.run = run; state.source = source; state.synthetic = synthetic;
     state.threshold = (run.score_kind === "calibrated" || run.score_kind === "triaged") ? (run.tiers?.yellow ?? 0.99)
       : run.score_kind === "percentile" ? 0.98 : 0.75;
-    state.filter = "flagged"; state.page = 1; state.query = ""; state.sourceFilter = ""; state.descending = true;
+    state.filter = "flagged"; state.page = 1; state.query = ""; state.sourceFilter = ""; state.userFilter = ""; state.descending = true;
     state.rowsById = new Map(); state.minTime = Infinity; state.maxTime = -Infinity;
     for (const row of run.rows) {
       row.time = new Date(row.timestamp).getTime(); row.signals = row.reasons.map(humanReason);
       state.rowsById.set(row.id, row); state.minTime = Math.min(state.minTime, row.time); state.maxTime = Math.max(state.maxTime, row.time);
     }
     $("threshold").value = String(state.threshold * 100); $("search").value = "";
+    const cut=document.querySelector(".threshold-label"); if (cut) cut.hidden = !!run.tiers;
     $("results-title").textContent = source;
     const duration = run.elapsed_ms < 1000 ? `${Math.max(1, Math.round(run.elapsed_ms))} ms` : `${(run.elapsed_ms / 1000).toFixed(1)} s`;
     $("run-description").textContent = `${dayLabel(state.minTime)}, ${dateFormat(state.minTime,{year:"numeric"})} – ${dayLabel(state.maxTime)}, ${dateFormat(state.maxTime,{year:"numeric"})} · ${run.model_name} · analyzed in ${duration}`;
     const sampleNotice = synthetic ? "Synthetic sample. " : "";
     $("run-notice").classList.toggle("external-run", !!run.external);
-    $("run-notice").textContent = (run.external ? "Sent to OpenAI for review. " : "") + sampleNotice + (run.mode === "heuristic" ? "Preview rules only — these results are indicators for review. No trained model or historical user profile was used." : (run.notice || "Scored with your trained model. A high score does not confirm an attack."));
+    $("run-notice").classList.toggle("warn-run", !!run.warning);
+    $("run-notice").textContent = (run.warning ? run.warning + " " : "") + (run.external ? "Sent to OpenAI for review. " : "") + sampleNotice + (run.mode === "heuristic" ? "Preview rules only — these results are indicators for review. No trained model or historical user profile was used." : (run.notice || "Scored with your trained model. A high score does not confirm an attack."));
     $("score-explanation").textContent = run.score_kind === "triaged" ? "The GMM scored every line locally, then an LLM reviewed only its top slice with each user\u2019s normal-access profile. The review queue is exactly what the LLM confirmed; cleared and unreviewed lines sit below the cutoff. Log lines were sent to OpenAI for the review step." : run.score_kind === "calibrated" ? "Scores are calibrated against the training baseline, so they do not depend on what else you uploaded: 99.0 means more unusual than 99% of normal traffic. Amber marks the top 1%, red the top 0.1%. Explanation tags describe input features, not model attribution." : run.score_kind === "percentile" ? "Scores are batch percentiles. A cutoff of 98 reviews approximately the top 2% of this file (ties may change that). Explanation tags describe input features, not model attribution." : "Scores are fixed rule weights, not attack probabilities. The cutoff controls which requests appear in the review queue. A request below the cutoff may still deserve investigation.";
     showResults(); renderSummary(); renderTable();
     toast(`${number(run.rows.length)} requests analyzed.`);
@@ -143,6 +145,7 @@ async function analyze(logs, model, source, synthetic = false) {
   finally { state.busy = false; syncControls(); }
 }
 function renderSummary() {
+  renderUsers(); renderCluster();
   if (!state.run) return;
   state.flagged = state.run.rows.filter(isFlagged);
   const sources = new Map();
@@ -152,13 +155,50 @@ function renderSummary() {
   }
   $("stat-total").textContent = number(state.run.rows.length);
   $("stat-flagged").textContent = number(state.flagged.length);
-  $("stat-rate").textContent = `${(state.flagged.length / state.run.rows.length * 100).toFixed(1)}% at cutoff ${Math.round(state.threshold * 100)}`;
+  $("stat-rate").textContent = state.run.tiers ? `${(state.flagged.length / state.run.rows.length * 100).toFixed(2)}% of requests` : `${(state.flagged.length / state.run.rows.length * 100).toFixed(1)}% at cutoff ${Math.round(state.threshold * 100)}`;
   $("stat-sources").textContent = number(sources.size);
   $("flagged-count").textContent = number(state.flagged.length);
   document.querySelector(".context-grid").hidden = state.flagged.length === 0;
   const ordered = [...sources.values()].sort((a,b) => b.count - a.count);
   $("source-list").innerHTML = ordered.length ? ordered.slice(0,5).map((source) => `<button class="source-row ${state.sourceFilter === source.ip ? "active" : ""}" data-source="${escapeHTML(source.ip)}"><span class="source-summary"><strong>${escapeHTML(source.ip)}</strong><span>${escapeHTML([...source.users].map((user) => user === "-" ? "Anonymous" : user).slice(0,3).join(", "))}${source.users.size > 3 ? ` +${source.users.size - 3}` : ""}</span></span><span class="source-count">${number(source.count)} flagged</span></button>`).join("") + (ordered.length > 5 ? `<p class="context-note">Top 5 of ${number(ordered.length)} sources. Search the table for others.</p>` : "") : '<p class="context-note">No sources have requests above the current cutoff.</p>';
   renderActivity(); updateSourceFilter();
+}
+function renderUsers() {
+  const groups=new Map();
+  for (const row of state.run.rows) {
+    const entry=groups.get(row.user) || {user:row.user, total:0, flagged:0, ips:new Set()};
+    entry.total++; entry.ips.add(row.ip); if (isFlagged(row)) entry.flagged++;
+    groups.set(row.user, entry);
+  }
+  const ordered=[...groups.values()].sort((a,b)=>b.flagged-a.flagged||b.total-a.total);
+  $("user-list").innerHTML = ordered.slice(0,8).map((u)=>`<button class="source-row ${state.userFilter===u.user?"active":""}" data-user="${escapeHTML(u.user)}"><span class="source-summary"><strong>${escapeHTML(u.user==="-"?"Anonymous":u.user)}</strong><span>${number(u.total)} requests · ${escapeHTML([...u.ips].slice(0,2).join(", "))}${u.ips.size>2?` +${u.ips.size-2}`:""}</span></span><span class="source-count">${u.flagged?`${number(u.flagged)} flagged`:"none flagged"}</span></button>`).join("")
+    + (ordered.length>8?`<p class="context-note">Top 8 of ${number(ordered.length)} users.</p>`:"");
+  $("clear-user").hidden = !state.userFilter;
+}
+function renderCluster() {
+  const host=$("cluster-chart"); if (!host) return;
+  const rows=state.run.rows; if (!rows.length) { host.innerHTML=""; return; }
+  const w=Math.max(260, host.getBoundingClientRect().width || 700), h=190, L=34, R=10, T=10, B=22;
+  const iw=w-L-R, ih=h-T-B;
+  const t0=state.minTime, t1=state.maxTime||t0+1;
+  const X=(t)=>L+(t1===t0?0.5:(t-t0)/(t1-t0))*iw;
+  // rank-based Y so any model's scale spreads out legibly
+  const sorted=[...rows].map(r=>r.score).sort((a,b)=>a-b);
+  const pct=(v)=>{let lo=0,hi=sorted.length;while(lo<hi){const m=(lo+hi)>>1;sorted[m]<=v?lo=m+1:hi=m;}return lo/sorted.length;};
+  const Y=(s)=>T+ih-pct(s)*ih;
+  const flagged=rows.filter(isFlagged), plain=rows.filter((r)=>!isFlagged(r));
+  const step=plain.length>3000?Math.ceil(plain.length/3000):1;
+  const dots=(list,cls,r)=>list.map((row)=>`<circle class="${cls}" cx="${X(row.time).toFixed(1)}" cy="${Y(row.score).toFixed(1)}" r="${r}"><title>${escapeHTML(row.user)} · ${escapeHTML(row.method)} ${escapeHTML(row.path)} · ${(row.score*100).toFixed(2)}</title></circle>`).join("");
+  const cut=flagged.length?Y(Math.min(...flagged.map(r=>r.score))):null;
+  host.innerHTML=`<svg viewBox="0 0 ${w} ${h}" class="cluster-svg" role="img" aria-label="Requests by score over time">`
+    +`<line x1="${L}" y1="${T+ih}" x2="${L+iw}" y2="${T+ih}" class="cluster-axis"/>`
+    +`<line x1="${L}" y1="${T}" x2="${L}" y2="${T+ih}" class="cluster-axis"/>`
+    +(cut!==null?`<line x1="${L}" y1="${cut.toFixed(1)}" x2="${L+iw}" y2="${cut.toFixed(1)}" class="cluster-cut"/>`:"")
+    +dots(plain.filter((_,i)=>i%step===0),"dot-normal",1.8)+dots(flagged,"dot-flagged",3.2)
+    +`<text x="${L}" y="${h-6}" class="cluster-tick">${escapeHTML(dayLabel(t0))}</text>`
+    +`<text x="${L+iw}" y="${h-6}" text-anchor="end" class="cluster-tick">${escapeHTML(dayLabel(t1))}</text>`
+    +`<text x="${L-6}" y="${T+8}" text-anchor="end" class="cluster-tick">high</text>`
+    +`<text x="${L-6}" y="${T+ih}" text-anchor="end" class="cluster-tick">low</text></svg>`;
 }
 function renderActivity() {
   const day = 86400000, range = state.maxTime - state.minTime;
@@ -196,7 +236,7 @@ function updateSourceFilter() {
 function matchingRows() {
   if (!state.run) return [];
   const query=state.query.trim().toLowerCase(), base=state.filter === "flagged" ? state.flagged : state.run.rows;
-  const rows=base.filter((row) => (!state.sourceFilter || row.ip === state.sourceFilter) && (!query || [row.ip,row.user,row.path,row.method,row.status,...row.signals].join(" ").toLowerCase().includes(query)));
+  const rows=base.filter((row) => (!state.sourceFilter || row.ip === state.sourceFilter) && (!state.userFilter || row.user === state.userFilter) && (!query || [row.ip,row.user,row.path,row.method,row.status,...row.signals].join(" ").toLowerCase().includes(query)));
   return state.descending ? rows : rows.sort((a,b) => a.score-b.score || a.id-b.id);
 }
 function renderTable() {
@@ -274,6 +314,8 @@ $("search").addEventListener("input",()=>{clearTimeout(state.searchTimer);state.
 for(const filter of ["all","flagged"])$("filter-"+filter).addEventListener("click",()=>{state.filter=filter;state.page=1;renderTable();});
 $("source-list").addEventListener("click",(event)=>{const target=event.target.closest("[data-source]");if(target){state.sourceFilter=target.dataset.source;state.filter="flagged";state.page=1;renderSummary();renderTable();}});
 $("clear-source").addEventListener("click",()=>{state.sourceFilter="";state.page=1;renderSummary();renderTable();});
+$("user-list").addEventListener("click",(event)=>{const t=event.target.closest("[data-user]");if(t){state.userFilter=state.userFilter===t.dataset.user?"":t.dataset.user;state.filter="all";state.page=1;renderSummary();renderTable();}});
+$("clear-user").addEventListener("click",()=>{state.userFilter="";state.page=1;renderSummary();renderTable();});
 $("active-source").addEventListener("click",()=>{state.sourceFilter="";state.page=1;renderSummary();renderTable();});
 $("sort-score").addEventListener("click",()=>{state.descending=!state.descending;state.page=1;renderTable();});
 $("previous-page").addEventListener("click",()=>{state.page--;renderTable();});
