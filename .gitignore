@@ -1,2 +1,4 @@
 logs
 .claude
+venv
+.venv
