@@ -205,7 +205,7 @@ tr.detail td{background:var(--surface-2);font-size:12.5px}
     <span><button id="prev">Prev</button> <span id="pageinfo"></span> <button id="next">Next</button></span></div>
 </div>
 
-<div class="foot">Scoring runs locally &mdash; in your browser, or against the localhost backend when it is running. The in-browser rule is a JS port validated to match the Python scorer exactly; GMM and the deep autoencoder require the backend. Baseline learned from Aug 2025&ndash;Feb 2026 traffic.</div>
+<div class="foot">Scoring runs locally &mdash; in your browser, or against the localhost backend when it is running. The in-browser rule is a JS port validated to match the Python scorer exactly; GMM and the deep autoencoder require the backend. Baseline learned from Aug 2025&ndash;Feb 2026 traffic. Scores say a line is <em>statistically unusual for this user</em> &mdash; not that it is malicious. Flags are leads for a human to review.</div>
 </div>
 
 <script>
@@ -419,8 +419,8 @@ function render(){
   const topUser=(()=>{const m={};ROWS.forEach(r=>{if(r.tier!=="green")m[r.user]=(m[r.user]||0)+1;});
     const e=Object.entries(m).sort((a,b)=>b[1]-a[1])[0];return e?`${e[0]} (${e[1]})`:"—";})();
   const days=[...new Set(ROWS.map(r=>r.day))];
-  $("#tiles").innerHTML=[["",ROWS.length.toLocaleString(),"lines scored"],["red",c.red,"anomalies"],
-    ["yellow",c.yellow,"suspicious"],["green",c.green.toLocaleString(),"normal"],
+  $("#tiles").innerHTML=[["",ROWS.length.toLocaleString(),"lines scored"],["red",c.red,"flagged: anomaly"],
+    ["yellow",c.yellow,"flagged: suspicious"],["green",c.green.toLocaleString(),"not flagged"],
     ["",new Set(ROWS.map(r=>r.user)).size,"users"],["",topUser,"top flagged user"],
     ["",days.length||"—","days covered"]]
     .map(t=>`<div class="tile ${t[0]}"><div class="v">${t[1]}</div><div class="k">${t[2]}</div></div>`).join("");
