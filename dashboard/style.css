@@ -285,6 +285,9 @@ tbody tr:last-child td { border-bottom: 0; }
 #request-table tbody tr:focus-within { background: #f6f9fe; }
 .score-chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 3px 7px; min-width: 48px; color: #46576b; background: #eef2f6; border: 1px solid #e3e9ef; border-radius: 4px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .score-chip.flagged { color: #a52e2c; background: var(--red-wash); border-color: #f0d2cc; }
+.score-chip.tier-red { color: #a52e2c; background: var(--red-wash); border-color: #f0d2cc; }
+.score-chip.tier-yellow { color: #8a5b00; background: #fdf3dd; border-color: #f0e0bb; }
+.score-chip.tier-green { color: #46576b; background: #eef2f6; border-color: #e3e9ef; }
 .score-chip i { display: none; }
 .request-cell { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .method { flex-shrink: 0; font-family: var(--mono); color: #576778; font-size: 12px; font-weight: 600; }

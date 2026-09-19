@@ -126,6 +126,17 @@ class DeepAEDetector:
             out = model(torch.tensor(Xs, dtype=torch.float32, device=dev)).float().cpu().numpy()
         return (Xs - out) ** 2
 
+    def score_abs(self, X):
+        """Absolute weighted reconstruction error, averaged over the ensemble.
+
+        `score` ranks within the batch (fine for benchmarking a fixed test set,
+        meaningless for a handful of pasted lines), so callers that need a value
+        comparable against the training distribution use this instead.
+        """
+        Xs = self.scaler.transform(X).astype(np.float32)
+        per = [(self._recon_err(m, Xs) / self.feat_err).mean(axis=1) for m in self.models]
+        return np.mean(per, axis=0)
+
     def score(self, X):
         Xs = self.scaler.transform(X).astype(np.float32)
         from scipy.stats import rankdata
