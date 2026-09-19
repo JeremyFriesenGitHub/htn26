@@ -161,9 +161,12 @@ class ModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             with mock.patch.object(dashboard, "STORE", Path(folder)), mock.patch.object(dashboard.importlib, "import_module") as importer:
                 status = dashboard.model_status()
-                self.assertEqual([model["available"] for model in status["models"]], [True, False, False])
+                # Only the dependency-free preview works without artifacts. Keyed by id so
+                # adding a model does not break this on ordering.
+                self.assertEqual({model["id"]: model["available"] for model in status["models"]},
+                                 {"rules": True, "hybrid": False, "gmm": False, "ae": False})
                 importer.assert_not_called()
-                for model in ("gmm", "ae"):
+                for model in ("gmm", "ae", "hybrid"):
                     with self.assertRaises(dashboard.APIError) as raised:
                         dashboard.predict_payload({"logs": log(), "model": model})
                     self.assertEqual(raised.exception.status, 503)

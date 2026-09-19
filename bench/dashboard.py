@@ -29,7 +29,9 @@ ROOT = Path(__file__).resolve().parent.parent
 STORE = ROOT / "results" / "model_store"
 STATIC = ROOT / "dashboard"
 MAX_LINE_BYTES = 16384
-MODEL_NAMES = {"rules": "Heuristic preview", "gmm": "Gaussian mixture", "ae": "Deep autoencoder"}
+MODEL_NAMES = {"rules": "Heuristic preview", "gmm": "Gaussian mixture", "ae": "Deep autoencoder",
+               "hybrid": "GMM + LLM triage"}
+HYBRID_TOPK = 60  # only the detector's shortlist is sent for review
 MODEL_FILES = {"gmm": ("encoder.pkl", "gmm.pkl"),
                "ae": ("encoder.pkl", "ae_meta.pkl", "ae_models.pt")}
 SCORING_LOCK = threading.Lock()
@@ -154,9 +156,35 @@ def parse_logs(logs):
     return records
 
 
+def _hybrid_status():
+    """The hybrid needs the GMM artifacts, the openai client, and a key.
+
+    It is the only model that sends data off this machine, so say so plainly.
+    """
+    import os
+    detail = ("Ranks every line with the GMM, then sends only the top %d to an LLM for review "
+              "with each user's normal-access profile. SENDS THOSE LINES TO OPENAI." % HYBRID_TOPK)
+    missing = [name for name in MODEL_FILES["gmm"] if not (STORE / name).is_file()]
+    if missing:
+        return {"id": "hybrid", "name": MODEL_NAMES["hybrid"], "available": False,
+                "detail": "Missing model artifacts: %s. Run python -m bench.train." % ", ".join(missing)}
+    for dependency in ("numpy", "pandas", "sklearn", "scipy", "openai"):
+        try:
+            importlib.import_module(dependency)
+        except Exception:
+            return {"id": "hybrid", "name": MODEL_NAMES["hybrid"], "available": False,
+                    "detail": "The %s package is required for LLM triage." % dependency}
+    if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+        return {"id": "hybrid", "name": MODEL_NAMES["hybrid"], "available": False,
+                "detail": "Set OPENAI_API_KEY before starting the dashboard to enable LLM triage."}
+    return {"id": "hybrid", "name": MODEL_NAMES["hybrid"], "available": True,
+            "detail": detail, "external": True}
+
+
 def model_status():
     result = [{"id": "rules", "name": MODEL_NAMES["rules"], "available": True,
                "detail": "Local, deterministic request rules; no trained model or learned user baseline."}]
+    result.append(_hybrid_status())
     for model, artifacts in MODEL_FILES.items():
         missing = [name for name in artifacts if not (STORE / name).is_file()]
         available = not missing
@@ -374,6 +402,99 @@ def score_trained(records, model):
     return sorted(result, key=lambda row: (-row["score"], row["id"]))
 
 
+_PROFILES = {}
+
+
+def user_profiles():
+    """What normal access looks like per user, learned from the training window."""
+    if "p" in _PROFILES:
+        return _PROFILES["p"]
+    with CALIBRATION_LOCK:
+        if "p" in _PROFILES:
+            return _PROFILES["p"]
+        cache = STORE / "profiles.json"
+        profiles = None
+        if cache.is_file():
+            try:
+                loaded = json.loads(cache.read_text())
+                if isinstance(loaded, dict) and loaded:
+                    profiles = loaded
+            except (OSError, ValueError):
+                profiles = None
+        if profiles is None:
+            try:
+                from . import data as data_module, hybrid
+                frame = data_module.load()
+                profiles = hybrid.build_profiles(frame[frame.ts < data_module.VAL_END])
+                try:
+                    cache.write_text(json.dumps(profiles))
+                except OSError:
+                    pass
+            except Exception:
+                profiles = {}
+        _PROFILES["p"] = profiles
+        return profiles
+
+
+def score_hybrid(records):
+    """GMM ranks every line; the LLM reviews only the top slice, with profiles.
+
+    The review queue becomes exactly what the LLM confirms: confirmed lines are
+    pushed above the amber cutoff, everything else below it.
+    """
+    rows = score_trained(records, "gmm")
+    if not rows or "tier" not in rows[0]:
+        raise APIError("LLM triage needs the calibrated GMM; regenerate the model store.", 503)
+    shortlist = rows[:min(HYBRID_TOPK, len(rows))]
+    profiles = user_profiles()
+    by_id = {row["id"]: row for row in rows}
+
+    lines = []
+    for position, row in enumerate(shortlist, 1):
+        profile = profiles.get(row["user"], {})
+        lines.append(
+            "ALERT %d:\n    line: %s\n    user profile: usual_ips=%s, normally_accesses=%s, "
+            "normally_denied=%s\n    detector score: %.4f  signals: %s" % (
+                position, row["raw"], profile.get("usual_ips"),
+                profile.get("normally_accesses"), profile.get("normally_denied"),
+                row["score"], ", ".join(row["reasons"]) or "none"))
+    prompt = ("Triage these detector alerts. Use each alert's profile: authorised access to "
+              "sensitive files IS normal when it matches the user's profile.\n\n"
+              + "\n\n".join(lines) + "\n\nReturn a verdict for every alert id as JSON.")
+
+    from . import hybrid
+    from . import llm_baseline as L
+    provider = L.OpenAIProvider("gpt-5")
+    L.SYSTEM, L.SCHEMA = hybrid.SYSTEM, hybrid.SCHEMA
+    L.MAX_OUT, L.REASONING_EFFORT = 16000, "low"
+    parsed, _, _ = provider.classify(prompt)
+    verdicts = {int(v["id"]): v for v in parsed.get("verdicts", []) if "id" in v}
+    if not verdicts:
+        raise APIError("The LLM returned no verdicts for this upload.", 503)
+
+    confirmed = 0
+    for position, row in enumerate(shortlist, 1):
+        verdict = verdicts.get(position)
+        if verdict is None:
+            continue
+        target = by_id[row["id"]]
+        reason = str(verdict.get("reason", "")).strip()
+        if verdict.get("is_incident"):
+            confirmed += 1
+            target["score"] = max(target["score"], 0.999)
+            target["tier"] = "red"
+            target["reasons"] = target["reasons"] + (["LLM: " + reason] if reason else [])
+        else:
+            target["score"] = min(target["score"], 0.98)
+            target["tier"] = "green"
+            target["reasons"] = target["reasons"] + (["LLM cleared: " + reason] if reason else [])
+    # anything the LLM never saw stays below the review cutoff
+    for row in rows[len(shortlist):]:
+        row["score"] = min(row["score"], 0.98)
+        row["tier"] = tier_for(row["score"]) if row["score"] < 0.99 else "yellow"
+    return sorted(rows, key=lambda row: (-row["score"], row["id"])), confirmed, len(shortlist)
+
+
 def predict_payload(payload):
     start = time.perf_counter()
     if not isinstance(payload, dict):
@@ -382,6 +503,24 @@ def predict_payload(payload):
     if not isinstance(model, str) or model not in MODEL_NAMES:
         raise APIError("Choose rules, gmm, or ae as the model.")
     records = parse_logs(payload.get("logs"))
+    if model == "hybrid":
+        status = next(item for item in model_status()["models"] if item["id"] == "hybrid")
+        if not status["available"]:
+            raise APIError(status["detail"], 503)
+        try:
+            rows, confirmed, reviewed = score_hybrid(records)
+        except APIError:
+            raise
+        except Exception:
+            raise APIError("LLM triage could not complete. Check OPENAI_API_KEY and connectivity.", 503) from None
+        return {"model": model, "model_name": MODEL_NAMES[model], "mode": "trained",
+                "score_kind": "triaged", "external": True,
+                "notice": ("The GMM ranked every line locally; the top %d were sent to OpenAI for "
+                           "review with each user's normal-access profile. %d were confirmed and "
+                           "appear in the review queue; the rest were cleared. Log lines left this "
+                           "machine for that step." % (reviewed, confirmed)),
+                "tiers": dict(TIER_THRESHOLDS),
+                "elapsed_ms": round((time.perf_counter() - start) * 1000, 2), "rows": rows}
     if model == "rules":
         rows = score_rules(records)
         notice = ("Heuristic preview uses fixed request rules and earlier same-IP/user login failures "

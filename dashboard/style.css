@@ -485,3 +485,5 @@ th small { font-size: 12px; font-weight: 400; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+.run-notice.external-run { border-left: 3px solid #b8860b; background: #fdf3dd; color: #6b4e00; }
