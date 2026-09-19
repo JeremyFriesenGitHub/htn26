@@ -33,7 +33,7 @@ const humanReason = (reason) => {
   return known[reason] || reason.replace(/-/g," ").replace(/60s/g,"60 seconds");
 };
 const isFlagged = (row) => row.score >= state.threshold;
-const scoreChip = (row) => `<span class="score-chip ${isFlagged(row) ? "flagged" : ""}">${(row.score * 100).toFixed(1)}</span>`;
+const scoreChip = (row) => `<span class="score-chip ${row.tier ? `tier-${row.tier}` : ""} ${isFlagged(row) ? "flagged" : ""}">${(row.score * 100).toFixed(1)}</span>`;
 
 async function api(path, options = {}) {
   let response;
@@ -101,7 +101,7 @@ async function readFile(file) {
 }
 function modelHelp() {
   const model = state.models.find((item) => item.id === $("model-select").value);
-  $("model-help").textContent = model?.id === "rules" ? "Preview rules check request patterns and repeated login failures. They do not use a trained model or a learned user profile." : model ? "Uses your saved model to rank requests against learned behavior. Scores are percentiles within this file, not attack probabilities." : "No model information available.";
+  $("model-help").textContent = model?.id === "rules" ? "Preview rules check request patterns and repeated login failures. They do not use a trained model or a learned user profile." : model ? "Uses your saved model, calibrated against its training baseline: 99.0 means more unusual than 99% of normal traffic. Scores measure how unusual a request is, not the probability of an attack." : "No model information available.";
 }
 function renderModels() {
   $("model-select").innerHTML = state.models.map((model) => `<option value="${escapeHTML(model.id)}" ${model.available ? "" : "disabled"}>${escapeHTML(model.id === "rules" ? "Preview rules" : model.name)}${model.available ? "" : " — unavailable"}</option>`).join("");
@@ -116,7 +116,8 @@ async function analyze(logs, model, source, synthetic = false) {
   try {
     const run = await api("/api/predict", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({logs, model})});
     state.run = run; state.source = source; state.synthetic = synthetic;
-    state.threshold = run.score_kind === "percentile" ? 0.98 : 0.75;
+    state.threshold = run.score_kind === "calibrated" ? (run.tiers?.yellow ?? 0.99)
+      : run.score_kind === "percentile" ? 0.98 : 0.75;
     state.filter = "flagged"; state.page = 1; state.query = ""; state.sourceFilter = ""; state.descending = true;
     state.rowsById = new Map(); state.minTime = Infinity; state.maxTime = -Infinity;
     for (const row of run.rows) {
@@ -128,8 +129,8 @@ async function analyze(logs, model, source, synthetic = false) {
     const duration = run.elapsed_ms < 1000 ? `${Math.max(1, Math.round(run.elapsed_ms))} ms` : `${(run.elapsed_ms / 1000).toFixed(1)} s`;
     $("run-description").textContent = `${dayLabel(state.minTime)}, ${dateFormat(state.minTime,{year:"numeric"})} – ${dayLabel(state.maxTime)}, ${dateFormat(state.maxTime,{year:"numeric"})} · ${run.model_name} · analyzed in ${duration}`;
     const sampleNotice = synthetic ? "Synthetic sample. " : "";
-    $("run-notice").textContent = sampleNotice + (run.mode === "heuristic" ? "Preview rules only — these results are indicators for review. No trained model or historical user profile was used." : "Scored with your trained model. Scores rank requests within this batch; a high score does not confirm an attack.");
-    $("score-explanation").textContent = run.score_kind === "percentile" ? "Scores are batch percentiles. A cutoff of 98 reviews approximately the top 2% of this file (ties may change that). Explanation tags describe input features, not model attribution." : "Scores are fixed rule weights, not attack probabilities. The cutoff controls which requests appear in the review queue. A request below the cutoff may still deserve investigation.";
+    $("run-notice").textContent = sampleNotice + (run.mode === "heuristic" ? "Preview rules only — these results are indicators for review. No trained model or historical user profile was used." : (run.notice || "Scored with your trained model. A high score does not confirm an attack."));
+    $("score-explanation").textContent = run.score_kind === "calibrated" ? "Scores are calibrated against the training baseline, so they do not depend on what else you uploaded: 99.0 means more unusual than 99% of normal traffic. Amber marks the top 1%, red the top 0.1%. Explanation tags describe input features, not model attribution." : run.score_kind === "percentile" ? "Scores are batch percentiles. A cutoff of 98 reviews approximately the top 2% of this file (ties may change that). Explanation tags describe input features, not model attribution." : "Scores are fixed rule weights, not attack probabilities. The cutoff controls which requests appear in the review queue. A request below the cutoff may still deserve investigation.";
     showResults(); renderSummary(); renderTable();
     toast(`${number(run.rows.length)} requests analyzed.`);
   } catch (error) { showError("analyze-error", error.message); }
@@ -214,7 +215,7 @@ function inspectRow(id) {
   $("detail-title").textContent=`${row.method} ${row.path}`;
   $("detail-line").textContent=`Original line ${number(row.id)} · ${state.source}`;
   const fields=[["Source",row.ip],["User",row.user==="-"?"Anonymous":row.user],["Time (UTC)",`${dayLabel(row.time)}, ${dateFormat(row.time,{year:"numeric"})} ${timeLabel(row.time)}`],["Response",`${row.status} · ${number(row.bytes)} bytes`]];
-  $("detail-content").innerHTML=`<div class="detail-score">${scoreChip(row)}<div><strong>${isFlagged(row)?"Marked for review":"Below the review cutoff"}</strong><span>${state.run.score_kind==="percentile"?"Batch percentile":"Rule score"} out of 100 · cutoff ${Math.round(state.threshold*100)}</span></div></div><dl class="detail-grid">${fields.map(([key,value])=>`<div><dt>${key}</dt><dd>${escapeHTML(value)}</dd></div>`).join("")}</dl><section class="detail-section"><h3>Signals</h3><ul class="signal-list">${row.signals.length?row.signals.map((signal)=>`<li>${escapeHTML(signal)}</li>`).join(""):"<li>No rule-based explanation tags for this request.</li>"}</ul>${state.run.mode==="trained"?'<p class="context-note">These tags describe input features; they are not an attribution of the model’s score.</p>':""}</section><section class="detail-section"><h3>Nearby requests from this IP and user</h3><p class="context-note">${number(first+1)}–${number(first+related.length)} of ${number(actorRows.length)} requests from this actor, in time order. Selected request highlighted.</p><div class="table-scroll"><table class="related-table"><thead><tr><th>Time (UTC)</th><th>Request</th><th>Status</th><th>Score</th></tr></thead><tbody>${related.map((item)=>`<tr class="${item.id===id?"current-row":""} ${isFlagged(item)?"flagged-row":""}"><td>${dayLabel(item.time)} ${timeLabel(item.time)}</td><td><button class="text-button" data-related="${item.id}">${escapeHTML(item.method)} ${escapeHTML(item.path)}</button></td><td>${item.status}</td><td>${(item.score*100).toFixed(1)}</td></tr>`).join("")}</tbody></table></div></section><section class="detail-section"><h3>Original log line</h3><pre class="raw-log">${escapeHTML(row.raw)}</pre></section>`;
+  $("detail-content").innerHTML=`<div class="detail-score">${scoreChip(row)}<div><strong>${isFlagged(row)?"Marked for review":"Below the review cutoff"}</strong><span>${state.run.score_kind==="calibrated"?"Calibrated vs training baseline":state.run.score_kind==="percentile"?"Batch percentile":"Rule score"} out of 100 · cutoff ${Math.round(state.threshold*100)}</span></div></div><dl class="detail-grid">${fields.map(([key,value])=>`<div><dt>${key}</dt><dd>${escapeHTML(value)}</dd></div>`).join("")}</dl><section class="detail-section"><h3>Signals</h3><ul class="signal-list">${row.signals.length?row.signals.map((signal)=>`<li>${escapeHTML(signal)}</li>`).join(""):"<li>No rule-based explanation tags for this request.</li>"}</ul>${state.run.mode==="trained"?'<p class="context-note">These tags describe input features; they are not an attribution of the model’s score.</p>':""}</section><section class="detail-section"><h3>Nearby requests from this IP and user</h3><p class="context-note">${number(first+1)}–${number(first+related.length)} of ${number(actorRows.length)} requests from this actor, in time order. Selected request highlighted.</p><div class="table-scroll"><table class="related-table"><thead><tr><th>Time (UTC)</th><th>Request</th><th>Status</th><th>Score</th></tr></thead><tbody>${related.map((item)=>`<tr class="${item.id===id?"current-row":""} ${isFlagged(item)?"flagged-row":""}"><td>${dayLabel(item.time)} ${timeLabel(item.time)}</td><td><button class="text-button" data-related="${item.id}">${escapeHTML(item.method)} ${escapeHTML(item.path)}</button></td><td>${item.status}</td><td>${(item.score*100).toFixed(1)}</td></tr>`).join("")}</tbody></table></div></section><section class="detail-section"><h3>Original log line</h3><pre class="raw-log">${escapeHTML(row.raw)}</pre></section>`;
   if (!$("detail-dialog").open) $("detail-dialog").showModal();
 }
 function exportCSV() {

@@ -59,12 +59,16 @@ def score_frame(df: pd.DataFrame, model="ae"):
     enc = load_encoder()
     X = enc.transform(df)
     det = _load_ae() if model == "ae" else _load_gmm()
-    raw = np.asarray(det.score(X.values if model == "gmm" else X.values), float)
+    # absolute score where the detector offers one, so callers can calibrate it
+    # against the training distribution instead of ranking within the batch
+    scorer = getattr(det, "score_abs", det.score)
+    raw = np.asarray(scorer(X.values), float)
     from scipy.stats import rankdata
     pct = rankdata(raw) / len(raw)  # 0..1 percentile within this batch
     reasons = _reasons(X)
     out = df.copy()
     out["score"] = pct
+    out["score_raw"] = raw
     out["reasons"] = reasons
     return out.sort_values("score", ascending=False)
 

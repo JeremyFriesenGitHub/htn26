@@ -69,11 +69,14 @@ class LogRecord:
     bytes: int
     raw: str
 
-    def public(self, score, reasons):
-        return {"id": self.id, "timestamp": self.timestamp.isoformat(),
-                "ip": self.ip, "user": self.user, "method": self.method,
-                "path": self.path, "status": self.status, "bytes": self.bytes,
-                "score": float(score), "reasons": reasons, "raw": self.raw}
+    def public(self, score, reasons, tier=None):
+        row = {"id": self.id, "timestamp": self.timestamp.isoformat(),
+               "ip": self.ip, "user": self.user, "method": self.method,
+               "path": self.path, "status": self.status, "bytes": self.bytes,
+               "score": float(score), "reasons": reasons, "raw": self.raw}
+        if tier:
+            row["tier"] = tier
+        return row
 
 
 def parse_logs(logs):
@@ -157,7 +160,7 @@ def model_status():
     for model, artifacts in MODEL_FILES.items():
         missing = [name for name in artifacts if not (STORE / name).is_file()]
         available = not missing
-        detail = "Uses the saved model; scores are percentiles within this batch."
+        detail = "Uses the saved model; scores are calibrated against the training baseline."
         if missing:
             detail = "Missing model artifacts: %s. Run python -m bench.train in your ML environment." % ", ".join(missing)
         else:
@@ -247,6 +250,87 @@ def score_rules(records):
     return sorted(rows, key=lambda row: (-row["score"], row["id"]))
 
 
+CALIBRATION_QUANTILES = 1001
+CALIBRATION_LOCK = threading.Lock()
+_CALIBRATION = {}
+# A calibrated score is the fraction of TRAINING traffic that scored lower, so
+# 0.999 reads "more unusual than 99.9% of normal activity" regardless of model.
+TIER_THRESHOLDS = {"yellow": 0.99, "red": 0.999}
+
+
+def calibration(model):
+    """Quantiles of the model's score over training traffic, cached on disk.
+
+    Batch percentiles are meaningless for a small upload - paste five ordinary
+    lines and one still ranks top. Calibrating against the training distribution
+    gives an absolute reading that does not depend on what else was uploaded.
+    """
+    if model in _CALIBRATION:
+        return _CALIBRATION[model]
+    with CALIBRATION_LOCK:
+        if model in _CALIBRATION:
+            return _CALIBRATION[model]
+        cache = STORE / ("calibration_%s.json" % model)
+        grid = None
+        if cache.is_file():
+            try:
+                loaded = json.loads(cache.read_text())
+                if isinstance(loaded, list) and len(loaded) > 1:
+                    grid = [float(v) for v in loaded]
+            except (OSError, ValueError, TypeError):
+                grid = None
+        if grid is None:
+            grid = _build_calibration(model)
+            if grid is not None:
+                try:
+                    cache.write_text(json.dumps(grid))
+                except OSError:
+                    pass
+        _CALIBRATION[model] = grid
+        return grid
+
+
+def _build_calibration(model):
+    """Score the training window once to learn what normal looks like."""
+    try:
+        import numpy as np
+        from . import data as data_module, predict
+        frame = data_module.load()
+        frame = frame[frame.ts < data_module.VAL_END]
+        if not len(frame):
+            return None
+        if len(frame) > 60000:
+            frame = frame.iloc[np.random.default_rng(0).choice(len(frame), 60000, replace=False)]
+        scored = predict.score_frame(frame.sort_values("ts").reset_index(drop=True), model=model)
+        if "score_raw" not in scored:
+            return None
+        raw = np.asarray(scored["score_raw"], dtype=float)
+        raw = raw[np.isfinite(raw)]
+        if raw.size < 100:
+            return None
+        return [float(v) for v in np.quantile(raw, np.linspace(0, 1, CALIBRATION_QUANTILES))]
+    except Exception:
+        return None  # calibration is an enhancement; scoring still works without it
+
+
+def calibrated_score(grid, raw):
+    """Fraction of the training distribution at or below `raw`, in [0, 1]."""
+    low, high = 0, len(grid)
+    while low < high:
+        mid = (low + high) // 2
+        if grid[mid] <= raw:
+            low = mid + 1
+        else:
+            high = mid
+    return min(1.0, max(0.0, low / (len(grid) - 1)))
+
+
+def tier_for(score):
+    if score >= TIER_THRESHOLDS["red"]:
+        return "red"
+    return "yellow" if score >= TIER_THRESHOLDS["yellow"] else "green"
+
+
 def score_trained(records, model):
     # Imports stay inside this path so the preview starts without ML packages.
     import pandas as pd
@@ -263,6 +347,10 @@ def score_trained(records, model):
     frame["ts"] = pd.to_datetime(frame["ts"], utc=True).dt.tz_convert(records[0].timestamp.tzinfo)
     with SCORING_LOCK:
         scored = predict.score_frame(frame, model=model)
+    # Prefer the absolute score calibrated against training traffic; fall back to
+    # the batch percentile when either is unavailable.
+    columns = getattr(scored, "columns", ())
+    grid = calibration(model) if "score_raw" in columns else None
     originals = {r.id: r for r in records}
     result = []
     seen = set()
@@ -271,9 +359,16 @@ def score_trained(records, model):
         if source_id not in originals or source_id in seen or not math.isfinite(score) or not 0 <= score <= 1:
             raise APIError("The saved model returned invalid results. Check or regenerate the model store.", 503)
         seen.add(source_id)
+        tier = None
+        if grid:
+            raw = float(row["score_raw"])
+            if not math.isfinite(raw):
+                raise APIError("The saved model returned invalid results. Check or regenerate the model store.", 503)
+            score = calibrated_score(grid, raw)
+            tier = tier_for(score)
         tags = str(row["reasons"])
         reasons = [tag for tag in tags.split(",") if tag and tag != "-"]
-        result.append(originals[source_id].public(score, reasons))
+        result.append(originals[source_id].public(score, reasons, tier))
     if len(result) != len(records):
         raise APIError("The saved model returned incomplete results. Check or regenerate the model store.", 503)
     return sorted(result, key=lambda row: (-row["score"], row["id"]))
@@ -303,13 +398,24 @@ def predict_payload(payload):
         except Exception:
             raise APIError("The saved model could not score this upload. Check that its artifacts "
                            "match the installed dependencies, or regenerate them with python -m bench.train.", 503) from None
-        notice = ("Trained model scores are percentiles within this uploaded batch, not attack "
-                  "probabilities. A high percentile only identifies a request that ranks highly "
-                  "in this batch; it does not confirm an attack.")
-    return {"model": model, "model_name": MODEL_NAMES[model],
-            "mode": "heuristic" if model == "rules" else "trained",
-            "score_kind": "heuristic" if model == "rules" else "percentile",
-            "notice": notice, "elapsed_ms": round((time.perf_counter() - start) * 1000, 2), "rows": rows}
+        calibrated = bool(rows) and "tier" in rows[0]
+        if calibrated:
+            notice = ("Scores are calibrated against the training baseline: 0.990 means more unusual "
+                      "than 99% of normal traffic. They measure how unusual a request is for that "
+                      "user, not the probability of an attack; legitimate activity can rank highly.")
+        else:
+            notice = ("Trained model scores are percentiles within this uploaded batch, not attack "
+                      "probabilities. A high percentile only identifies a request that ranks highly "
+                      "in this batch; it does not confirm an attack.")
+    payload = {"model": model, "model_name": MODEL_NAMES[model],
+               "mode": "heuristic" if model == "rules" else "trained",
+               "score_kind": "heuristic" if model == "rules" else
+                             ("calibrated" if calibrated else "percentile"),
+               "notice": notice, "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
+               "rows": rows}
+    if model != "rules" and calibrated:
+        payload["tiers"] = dict(TIER_THRESHOLDS)
+    return payload
 
 
 def sample_payload():
