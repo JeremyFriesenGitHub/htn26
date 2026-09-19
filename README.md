@@ -91,9 +91,10 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python -m bench.llm_baseline --provider openai --openai-model gpt-5
 .venv/bin/python -m bench.hybrid --model gmm --topk 60 --llm gpt-5
 
-# Interactive web console (scores logs in-browser; open results/webapp.html)
+# Interactive web console
 .venv/bin/python -m bench.export_web    # dump model.json + demo sample (+ parity check)
 .venv/bin/python -m bench.webapp        # build results/webapp.html
+.venv/bin/python -m bench.serve         # localhost site at http://localhost:8000
 ```
 
 ## Web console
@@ -102,5 +103,11 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 logs entirely in the browser: red/yellow/green triage with the reasons that fired, filters
 by user / IP / date / tier / text, and live charts (score-over-time, flagged-by-user). It
 runs the interpretable RuleNovelty model — a JS port validated to reproduce the Python
-scorer exactly (`bench/export_web.py` prints the parity check). The deep AE and GMM stay in
-the Python CLI for maximum accuracy.
+scorer exactly (`bench/export_web.py` prints the parity check).
+
+`bench/serve.py` serves that same page as a **localhost site** and adds `/api/score`, which
+scores with the *real* trained models (GMM and the deep autoencoder) instead of the JS port.
+Pick the model from the dropdown; tier thresholds are calibrated per model on training
+traffic (99th percentile = suspicious, 99.9th = anomaly). Opened as a static file the page
+still works — it falls back to the in-browser rule. The server models are stronger: both GMM
+and the AE flag the privilege-escalation line that the rule alone scores as normal.

@@ -60,6 +60,7 @@ h1{font-size:clamp(22px,3.4vw,30px);font-weight:750;letter-spacing:-.02em;margin
 textarea{width:100%;min-height:96px;resize:vertical;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;
   padding:11px 13px;font-family:var(--mono);font-size:12px;color:var(--text-primary);line-height:1.45;}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px;}
+.row select{background:var(--surface-2);border:1px solid var(--border);border-radius:9px;padding:8px 10px;font-size:13px;color:var(--text-primary);}
 button.btn{border:none;border-radius:9px;padding:9px 16px;font-size:13.5px;font-weight:600;cursor:pointer;background:var(--accent);color:#fff;}
 button.btn.ghost{background:var(--surface-2);color:var(--text-primary);border:1px solid var(--border);}
 button.btn:active{transform:translateY(1px);}
@@ -128,6 +129,11 @@ tbody tr:hover{background:var(--surface-2)}
   <textarea id="input" spellcheck="false" placeholder="10.0.5.12 - sarah_j [15/Mar/2026:22:30:40 -0400] &quot;GET /finance/reports/q1.zip HTTP/1.1&quot; 200 8459200"></textarea>
   <div class="row">
     <button class="btn" id="scoreBtn">Score logs</button>
+    <select id="model" title="Scoring model">
+      <option value="rule">Rule &mdash; in-browser</option>
+      <option value="gmm">GMM &mdash; server</option>
+      <option value="ae">Deep AE &mdash; server</option>
+    </select>
     <button class="btn ghost" id="demoBtn">Load demo (2,200 lines)</button>
     <button class="btn ghost" id="appendChk" title="Add to existing instead of replacing">append mode: off</button>
     <button class="btn ghost" id="clearBtn">Clear</button>
@@ -263,16 +269,53 @@ function reasons(r,f){
 // ---------- state ----------
 let ROWS=[], PAGE=0, PER=50, SORT={key:"score",asc:false};
 const tierOn={red:true,yellow:true,green:true};
+let RISK={lo:0,den:1};
+// models differ wildly in scale (rule ~1-19, GMM ~1e5, AE ~1e6), so normalise to 0-1 on a
+// shifted log scale for the bars/plot while still showing the raw score.
+function computeRisk(rows){
+  const ss=rows.map(r=>r.score); const lo=Math.min(...ss), hi=Math.max(...ss);
+  RISK.lo=lo; RISK.den=Math.log1p(Math.max(0,hi-lo))||1;
+  rows.forEach(r=>r.risk=riskOf(r.score));
+}
+function riskOf(v){return Math.min(1,Math.max(0,Math.log1p(Math.max(0,v-RISK.lo))/RISK.den));}
+function invRisk(f){return RISK.lo+Math.expm1(f*RISK.den);}
+function fmtScore(s){
+  const a=Math.abs(s);
+  if(a>=1e5)return s.toExponential(1);
+  if(a>=1000)return Math.round(s).toLocaleString();
+  return s.toFixed(1);
+}
 
-function ingest(text, append){
+async function scoreServer(rows, model){ // real Python models via the localhost backend
+  try{
+    rows.sort((a,b)=>a.epoch-b.epoch);
+    const res=await fetch("/api/score",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model, lines:rows.map(r=>r.raw)})});
+    if(!res.ok)return null;
+    const d=await res.json();
+    if(!d.scores||d.scores.length!==rows.length)return null;
+    rows.forEach((r,i)=>{r.score=d.scores[i];r.tier=d.tiers[i];
+      r.reasons=(d.reasons[i]&&d.reasons[i].length)?d.reasons[i]:["nominal"];});
+    return d;
+  }catch(e){ return null; }
+}
+async function ingest(text, append){
   const lines=text.split(/\r?\n/).filter(l=>l.trim());
   let parsed=[],bad=0;
   for(const l of lines){const r=parseLine(l); if(r)parsed.push(r); else if(l.trim())bad++;}
   if(!parsed.length){$("#parsemsg").textContent=`no valid log lines found${bad?` (${bad} unparseable)`:""}.`;return;}
   ROWS = append ? ROWS.concat(parsed) : parsed;
-  scoreAll(ROWS);
-  MODEL.display_max = Math.max(MODEL.tiers.red*1.2, ...ROWS.map(r=>r.score));
-  $("#parsemsg").textContent=`scored ${parsed.length} line${parsed.length>1?"s":""}${bad?`, skipped ${bad} unparseable`:""}.`;
+  const want=$("#model").value; let used=want, srv=null;
+  if(want==="rule"){ scoreAll(ROWS); }
+  else {
+    $("#parsemsg").textContent=`scoring ${ROWS.length} lines with ${want.toUpperCase()} on the server…`;
+    srv=await scoreServer(ROWS,want);
+    if(!srv){ scoreAll(ROWS); used="rule"; }
+  }
+  if(srv&&srv.tiers_at){ MODEL.tiers=srv.tiers_at; }
+  computeRisk(ROWS);
+  const note = used!==want ? ` — server unavailable, used in-browser rule (run: python -m bench.serve)` : "";
+  $("#parsemsg").textContent=`scored ${parsed.length} line${parsed.length>1?"s":""} with ${used.toUpperCase()}${bad?`, skipped ${bad} unparseable`:""}${note}.`;
   PAGE=0; buildFilters(); render();
 }
 function buildFilters(){
@@ -324,11 +367,11 @@ function render(){
   if(PAGE>=pages)PAGE=pages-1; if(PAGE<0)PAGE=0;
   const slice=rows.slice(PAGE*PER,PAGE*PER+PER);
   $("#tbody").innerHTML = slice.length? slice.map(r=>{
-    const w=Math.max(3,Math.min(100,r.score/MODEL.display_max*100));
+    const w=Math.max(3,Math.min(100,r.risk*100));
     const time=new Date(r.ms).toISOString().replace("T"," ").slice(0,19);
     return `<tr class="t-${r.tier}">
       <td><span class="tdot"></span></td>
-      <td><div class="score-cell"><span>${r.score.toFixed(1)}</span><span class="bar"><i style="width:${w}%"></i></span></div></td>
+      <td><div class="score-cell"><span>${fmtScore(r.score)}</span><span class="bar"><i style="width:${w}%"></i></span></div></td>
       <td class="mono" style="white-space:nowrap">${time}</td>
       <td>${r.user}</td><td class="mono">${r.ip}</td>
       <td class="mono">${esc(r.method)} ${esc(r.path)}</td>
@@ -348,10 +391,9 @@ function drawScatter(){
   const rows=filtered(); const W_=560,H=240,L=40,R=12,T=12,B=28,iw=W_-L-R,ih=H-T-B;
   if(!rows.length){return;}
   const t0=Math.min(...rows.map(r=>r.ms)), t1=Math.max(...rows.map(r=>r.ms))||t0+1;
-  const smax=MODEL.display_max;
-  const X=t=>L+(t1===t0?0.5:(t-t0)/(t1-t0))*iw, Y=s=>T+ih-Math.min(s,smax)/smax*ih;
+  const X=t=>L+(t1===t0?0.5:(t-t0)/(t1-t0))*iw, Y=s=>T+ih-riskOf(s)*ih;
   [0,.25,.5,.75,1].forEach(f=>{const y=T+ih-f*ih;svg.append(el("line",{x1:L,y1:y,x2:L+iw,y2:y,class:"grid","stroke-width":1}));
-    const tk=el("text",{x:L-6,y:y+3,"text-anchor":"end",class:"tick"});tk.textContent=(f*smax).toFixed(0);svg.append(tk);});
+    const tk=el("text",{x:L-6,y:y+3,"text-anchor":"end",class:"tick"});tk.textContent=fmtScore(invRisk(f));svg.append(tk);});
   // threshold lines
   [["red",MODEL.tiers.red],["yellow",MODEL.tiers.yellow]].forEach(([c,v])=>{
     svg.append(el("line",{x1:L,y1:Y(v),x2:L+iw,y2:Y(v),stroke:`var(--${c})`,"stroke-width":1,"stroke-dasharray":"4 3","opacity":.7}));});
@@ -392,6 +434,7 @@ function drawUserBars(){
 let APPEND=false;
 $("#scoreBtn").onclick=()=>ingest($("#input").value,APPEND);
 $("#demoBtn").onclick=()=>{$("#input").value=DEMO; ingest(DEMO,false);};
+$("#model").onchange=()=>{ if(ROWS.length) ingest(ROWS.map(r=>r.raw).join("\n"),false); };
 $("#clearBtn").onclick=()=>{$("#input").value="";ROWS=[];render();$("#parsemsg").textContent="";};
 $("#appendChk").onclick=()=>{APPEND=!APPEND;$("#appendChk").textContent="append mode: "+(APPEND?"on":"off");};
 ["#q","#fuser","#fip","#dfrom","#dto"].forEach(s=>$(s).addEventListener("input",()=>{PAGE=0;render();}));
