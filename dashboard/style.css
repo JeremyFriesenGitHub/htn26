@@ -285,9 +285,7 @@ tbody tr:last-child td { border-bottom: 0; }
 #request-table tbody tr:focus-within { background: #f6f9fe; }
 .score-chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 3px 7px; min-width: 48px; color: #46576b; background: #eef2f6; border: 1px solid #e3e9ef; border-radius: 4px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .score-chip.flagged { color: #a52e2c; background: var(--red-wash); border-color: #f0d2cc; }
-.score-chip.tier-red { color: #a52e2c; background: var(--red-wash); border-color: #f0d2cc; }
-.score-chip.tier-yellow { color: #8a5b00; background: #fdf3dd; border-color: #f0e0bb; }
-.score-chip.tier-green { color: #46576b; background: #eef2f6; border-color: #e3e9ef; }
+
 .score-chip i { display: none; }
 .request-cell { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .method { flex-shrink: 0; font-family: var(--mono); color: #576778; font-size: 12px; font-weight: 600; }
@@ -487,3 +485,11 @@ th small { font-size: 12px; font-weight: 400; }
 }
 
 .run-notice.external-run { border-left: 3px solid #b8860b; background: #fdf3dd; color: #6b4e00; }
+
+.cluster-svg { width: 100%; height: auto; display: block; }
+.cluster-axis { stroke: #d8dee6; stroke-width: 1; }
+.cluster-cut { stroke: #d98b86; stroke-width: 1; stroke-dasharray: 4 3; }
+.cluster-tick { fill: #7b8896; font-size: 10px; }
+.dot-normal { fill: #9fb0c2; opacity: .45; }
+.dot-flagged { fill: #c0392b; opacity: .95; }
+.run-notice.warn-run { border-left: 3px solid #c0392b; background: #fbeae8; color: #7a2b22; }
