@@ -43,6 +43,7 @@ failed logins) so naive rules drown in false positives.
 | ECOD | CTX | 0.862 | [0.70, 0.99] | 19/22 | |
 | KMeans | CTX | 0.836 | — | 20/22 | |
 | GPT-5 (blind LLM) | — | 0.324 | — | 10/22 | recall 0.77, precision 0.07, $4.72/run |
+| Claude Opus 5 (blind LLM) | — | ≤0.11* | — | 6/22 | recall 0.77, precision 0.03, 614 FPs; *partial run (154/192 windows, credit exhausted) |
 | KMeans | RAW | 0.646 | — | 16/22 | same algorithm, naive features |
 
 ### Hybrid: detector shortlist → LLM triage (recommended production design)
@@ -66,11 +67,13 @@ CSRF-chain step the LLM reasonably cleared.
 2. *Proper engineering matters.* A naive autoencoder loses to GMM (0.87 vs 0.91); the fully
    engineered AE ensemble edges ahead (0.918) — though with 22 attacks the CI overlap means
    the AE-vs-GMM gap is not statistically significant.
-3. *The trained models crush the blind LLM* (0.92 vs 0.32). GPT-5 finds the attack (recall
-   0.77) but has no learned permission model, so it flags every authorised read of a
-   `*_CONFIDENTIAL` file — 225 false positives. The detectors, having learned each user's
-   normal resource set, don't. The strongest production design is a hybrid: a detector
-   scores every line, the LLM triages the top-k with permission context.
+3. *The trained models crush the blind LLMs* (0.92 vs 0.32). **Both** GPT-5 and Claude
+   Opus 5 find the attack (recall 0.77) but have no learned permission model, so they flag
+   every authorised read of a `*_CONFIDENTIAL` file — 225 and 614 false positives
+   respectively. The failure is architectural, not provider-specific. The detectors, having
+   learned each user's normal resource set, don't make that mistake. The strongest
+   production design is the hybrid below: a detector scores every line, the LLM triages the
+   top-k with permission context.
 
 ## Usage
 ```bash
