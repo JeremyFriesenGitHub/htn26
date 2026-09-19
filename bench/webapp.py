@@ -547,15 +547,26 @@ ta.addEventListener("drop",async e=>{
   const txt=(await Promise.all(f.map(x=>x.text()))).join("\n");
   $("#input").value=txt.length>400000?txt.slice(0,400000):txt; ingest(txt,APPEND);});
 
-$("#csvBtn").onclick=()=>{
+$("#csvBtn").onclick=async()=>{
   const rows=sortRows(filtered());
   const head=["time","user","ip","method","path","status","bytes","score","tier","reasons"];
   const q=v=>`"${String(v).replace(/"/g,'""')}"`;
   const csv=[head.join(",")].concat(rows.map(r=>[r.disp,r.user,r.ip,r.method,r.path,r.status,r.bytes,
     r.score.toFixed(4),r.tier,r.reasons.join(" ")].map(q).join(","))).join("\n");
+  const filename=`scored_logs_${new Date().toISOString().slice(0,10)}.csv`;
+  // in the claude.ai viewer a blob download is inert - go through the downloads
+  // capability there; on localhost / as a plain file fall back to a blob link.
+  let dl=null;
+  try{ dl = (window.claude && claude.use) ? await claude.use("downloads") : null; }catch(e){ dl=null; }
+  if(dl){
+    try{ await dl.save({filename,data:csv}); }
+    catch(err){ if(err&&err.code!=="declined")
+      $("#parsemsg").textContent="export unavailable ("+((err&&err.code)||"error")+")."; }
+    return;
+  }
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
-  a.download=`scored_logs_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+  a.download=filename; a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);};
 
 async function boot(){
