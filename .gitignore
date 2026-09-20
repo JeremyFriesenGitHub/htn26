@@ -1,6 +1,8 @@
 # secrets & env
 .keys.env
 .env
+.env.*
+.vercel/
 
 # data (large, provided separately)
 logs

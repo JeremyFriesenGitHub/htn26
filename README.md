@@ -1,8 +1,8 @@
 # htn26 — Log anomaly detection
 
 Unsupervised detection of a security incident hidden in 180,800 Apache access-log lines
-(Aug 2025 – Mar 2026), plus a rigorous comparison of detector architectures against a
-blind LLM baseline.
+(Aug 2025 – Mar 2026), a rigorous comparison of detector architectures against blind LLM
+baselines, and an interactive console for scoring new logs.
 
 ## The problem
 The log has 7 informative fields (IP, user, timestamp, method, path, status, bytes). One
@@ -12,13 +12,30 @@ data exfiltration. There are **no labels** — this is unsupervised anomaly dete
 background is seeded with decoys (off-hours activity, weekend traffic, 403 probes, isolated
 failed logins) so naive rules drown in false positives.
 
+## How the model works (plain version)
+
+1. **Learn each person's habits** from the training months: which IP they normally use,
+   which resources they normally access or are always denied, which endpoints exist at all.
+2. **Turn every new log line into 15 numbers** describing how unusual it is — *has this user
+   ever come from this IP? how many failed logins in the last 60s? is this a resource they
+   are normally denied?* (`bench/features.py`).
+3. **Score those 15 numbers** with a density model that learned what normal combinations
+   look like. Rare combination = high score.
+4. **Threshold into three tiers** — anomaly / suspicious / normal.
+
+The feature step is the model. Swapping the scorer barely matters (GMM 0.909 vs deep AE
+0.918, overlapping CIs); swapping the *features* matters enormously (the same GMM goes
+0.61 → 0.91 moving from raw fields to these). **No LLM runs in the detector or the console** —
+"context features" means learned statistics, not an LLM context window.
+
 ## Approach
 - **Two feature views** (`bench/features.py`): a naive 7-field `RAW` view, and a causal,
-  behavioural `CTX` view (per-user IP/endpoint/parameter rarity, novelty flags, rolling
-  failed-login and request bursts, per-user resource-denial history). All statistics are
-  fit on training data only and computed causally (each row sees only earlier rows).
-- **Time split** (`bench/data.py`): fit on Aug 2025–Jan 2026, validate on Feb, test on Mar
-  (the month with the incident). Nothing before March is ever labelled.
+  behavioural `CTX` view. All statistics are fit on training data only and computed causally
+  (each row sees only earlier rows).
+- **Time split** (`bench/data.py`): fit on Aug 2025–Jan 2026, validate on Feb, test on Mar.
+- **Ground truth** (`bench/labels.py`): the 22 real attack lines, hand-labelled from a
+  forensic reading and tiered `detectable` (20) vs `context`-only (2). Used **only** to
+  score, never to fit. These labels are a human judgement, not data that shipped with the log.
 - **Detector zoo** (`bench/models.py`): KMeans, GMM, IsolationForest, OneClassSVM, LOF,
   HBOS, ECOD, COPOD, PCA, AutoEncoder, DeepSVDD, and a no-ML weighted-surprisal rule.
 - **Deep model** (`bench/deep_model.py`): a GPU autoencoder ensemble with BatchNorm, GELU,
@@ -27,18 +44,18 @@ failed logins) so naive rules drown in false positives.
   reconstruction scoring.
 - **Label-free model selection** (`bench/inject.py`, `bench/evaluate_final.py`): synthetic
   attacks are injected into the February validation window to pick hyperparameters and the
-  operating threshold. The real March attack is used **only** for the final, one-shot
+  operating threshold. The real March attack is used only for the final, one-shot
   evaluation, reported with 1000× bootstrap 95% confidence intervals.
-- **LLM baseline** (`bench/llm_baseline.py`): a blind, chunked Claude/GPT reviewer scored on
-  the identical test set.
+- **LLM baselines** (`bench/llm_baseline.py`) and **hybrid triage** (`bench/hybrid.py`).
+- **Metrics** (`bench/metrics.py`): PR-AUC, ROC-AUC, recall@k, best-F1, alerts/day.
 
 ## Results (real March test, PR-AUC with 95% CI; higher = better)
 
 | Model | View | PR-AUC | 95% CI | Recall@50 | Notes |
 |---|---|---|---|---|---|
 | Deep AE ensemble (×7) | CTX | **0.918** | [0.79, 1.00] | 20/22 | GPU, best recall (21/22 at op point) |
-| GMM (k=4, diag) | CTX | 0.909 | [0.77, 1.00] | 20/22 | trains in <1s, no GPU, recommended |
-| Ensemble | CTX | 0.907 | [0.77, 1.00] | 20/22 | |
+| GMM (k=4, diag) | CTX | 0.909 | [0.77, 1.00] | 20/22 | trains in <1s, no GPU, **recommended** |
+| Ensemble | CTX | 0.907 | [0.77, 1.00] | 20/22 | no better than GMM alone |
 | RuleNovelty (no ML) | CTX | 0.867 | [0.71, 1.00] | 19/22 | interpretable, best ROC (0.990) |
 | ECOD | CTX | 0.862 | [0.70, 0.99] | 19/22 | |
 | KMeans | CTX | 0.836 | — | 20/22 | |
@@ -46,7 +63,7 @@ failed logins) so naive rules drown in false positives.
 | Claude Opus 5 (blind LLM) | — | ≤0.11* | — | 6/22 | recall 0.77, precision 0.03, 614 FPs; *partial run (154/192 windows, credit exhausted) |
 | KMeans | RAW | 0.646 | — | 16/22 | same algorithm, naive features |
 
-### Hybrid: detector shortlist → LLM triage (recommended production design)
+### Hybrid: detector shortlist → LLM triage (best design; CLI only, not in the console)
 
 | Approach | Precision | Recall | False positives | Cost/run | Alerts/day |
 |---|---|---|---|---|---|
@@ -55,10 +72,9 @@ failed logins) so naive rules drown in false positives.
 | **Hybrid (GMM → GPT-5, top-60)** | **1.00** | **0.86** | **0** | **$0.08** | **0.6** |
 
 The detector scores every line cheaply; the LLM adjudicates only the top-K candidates **with
-each user's learned permission profile** (usual IPs, normally-accessed/denied resources) —
-the context raw GPT lacked. That removes every false positive and costs 60× less (it never
-sees the bulk of the log). Its 3 misses are the two context-only rows and one benign-looking
-CSRF-chain step the LLM reasonably cleared.
+each user's learned permission profile** — the context raw GPT lacked. That removes every
+false positive and costs 60× less. Its 3 misses are the two context-only rows and one
+benign-looking CSRF-chain step the LLM reasonably cleared.
 
 **Takeaways**
 1. *Representation beats algorithm.* The CTX features lift every clusterer (KMeans
@@ -67,15 +83,63 @@ CSRF-chain step the LLM reasonably cleared.
 2. *Proper engineering matters.* A naive autoencoder loses to GMM (0.87 vs 0.91); the fully
    engineered AE ensemble edges ahead (0.918) — though with 22 attacks the CI overlap means
    the AE-vs-GMM gap is not statistically significant.
-3. *The trained models crush the blind LLMs* (0.92 vs 0.32). **Both** GPT-5 and Claude
-   Opus 5 find the attack (recall 0.77) but have no learned permission model, so they flag
-   every authorised read of a `*_CONFIDENTIAL` file — 225 and 614 false positives
-   respectively. The failure is architectural, not provider-specific. The detectors, having
-   learned each user's normal resource set, don't make that mistake. The strongest
-   production design is the hybrid below: a detector scores every line, the LLM triages the
-   top-k with permission context.
+3. *The trained models crush the blind LLMs* (0.92 vs 0.32). **Both** GPT-5 and Claude Opus 5
+   find the attack (recall 0.77) but have no learned permission model, so they flag every
+   authorised read of a `*_CONFIDENTIAL` file — 225 and 614 false positives respectively.
+   The failure is architectural, not provider-specific.
+
+## Web console
+
+`results/webapp.html` (built by `bench/webapp.py`) is an interactive console:
+
+- paste, **drag-and-drop or upload** `.log`/`.txt` files; append or replace
+- **red / yellow / green triage** with the reasons that fired per line
+- **detected incidents** — flagged lines grouped per user into bursts, so the attack shows
+  up as discrete incidents (brute-force bursts, CSRF probes, escalation, takeover); click
+  one to filter the table to it
+- **filters**: text search, user, IP, status, method, date range, tier chips, reset
+- sortable paged table with expandable row detail, **CSV export**, stat tiles, and two live
+  charts (score over time, flagged lines by user); light/dark
+
+**Model selector.** Opened as a plain file it runs the interpretable RuleNovelty scorer in
+the browser (a JS port validated to reproduce the Python scorer exactly — `bench/export_web.py`
+prints the parity check). Run `bench/serve.py` and it auto-detects the backend, defaults to
+the **real GMM**, and offers the **deep AE** too, scoring through `/api/score` with tier
+thresholds calibrated per model on training traffic. The hybrid LLM layer is **not** wired
+into the console.
+
+## Repo map
+```
+bench/data.py           parse logs, template paths, time split
+bench/labels.py         the 22 hand-labelled attack lines (evaluation only)
+bench/features.py       RAW and CTX feature views
+bench/models.py         detector zoo + RuleNovelty
+bench/deep_model.py     GPU autoencoder ensemble
+bench/inject.py         synthetic attacks for label-free selection
+bench/metrics.py        PR-AUC, recall@k, alerts/day
+bench/run_models.py     full benchmark (both views, 3 seeds)
+bench/evaluate_final.py val-selected, bootstrapped final evaluation
+bench/train.py          train + persist champions to results/model_store/
+bench/predict.py        score logs from the CLI, with reasons
+bench/llm_baseline.py   blind GPT/Claude baselines
+bench/hybrid.py         detector shortlist -> LLM triage
+bench/export_web.py     export model to JSON (+ Python/JS parity check)
+bench/webapp.py         build results/webapp.html
+bench/serve.py          localhost site + /api/score using the real models
+bench/report.py         build results/report.html (charts write-up)
+bench/aggregate.py      merge benchmark + LLM results into one leaderboard
+```
 
 ## Usage
+
+### Hosting on Vercel and Railway
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the complete setup. Vercel serves `dashboard/`
+and proxies `/api/*` to a Railway Flask/Gunicorn service using the existing scoring
+pipeline. Set `BACKEND_URL` on Vercel; upload the saved model artifacts to a Railway
+volume and set `MODEL_STORE`. Hybrid OpenAI triage is available in the current
+dashboard when the GMM artifacts and `OPENAI_API_KEY` are present (the older
+generated web console described above is separate).
 
 ### Local dashboard
 
@@ -134,14 +198,22 @@ Run the dashboard backend checks with `python3 -m unittest discover -s tests -v`
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
 # for GPU: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
-.venv/bin/python -m bench.run_models       # full detector benchmark (both views, 3 seeds)
-.venv/bin/python -m bench.evaluate_final   # rigorous val-selected, bootstrapped final eval
-.venv/bin/python -m bench.train            # train + persist champions to results/model_store/
-.venv/bin/python -m bench.predict --demo --model ae --top 20   # score logs, with reasons
-.venv/bin/python -m bench.predict --input newlogs.txt --model gmm
+.venv/bin/python -m bench.run_models       # full detector benchmark
+.venv/bin/python -m bench.evaluate_final   # val-selected, bootstrapped final eval
+.venv/bin/python -m bench.train            # train + persist champions
+.venv/bin/python -m bench.predict --demo --model ae --top 20
+.venv/bin/python -m bench.aggregate        # combined leaderboard
+.venv/bin/python -m bench.report           # build results/report.html
+
+# web console
+.venv/bin/python -m bench.export_web       # model.json + demo sample (+ parity check)
+.venv/bin/python -m bench.webapp           # build results/webapp.html
+.venv/bin/python -m bench.serve            # http://localhost:8000 (real GMM + deep AE)
 
 # LLM baseline + hybrid (need a funded key in .keys.env; source it first:
 #   set -a && . ./.keys.env && set +a)
 .venv/bin/python -m bench.llm_baseline --provider openai --openai-model gpt-5
 .venv/bin/python -m bench.hybrid --model gmm --topk 60 --llm gpt-5
 ```
+
+Generated outputs live in `results/` (gitignored, fully reproducible from the commands above).

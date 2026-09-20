@@ -7,6 +7,7 @@ model artifacts are present. Uploaded logs remain in memory for the request only
 from __future__ import annotations
 
 import argparse
+import os
 from bisect import bisect_left, bisect_right
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ from .model_registry import TRAINED_MODELS
 
 
 ROOT = Path(__file__).resolve().parent.parent
-STORE = ROOT / "results" / "model_store"
+STORE = Path(os.environ.get("MODEL_STORE", ROOT / "results" / "model_store"))
 STATIC = ROOT / "dashboard"
 MAX_LINE_BYTES = 16384
 MODEL_NAMES = {"rules": "Heuristic preview", "hybrid": "GMM + LLM triage",
