@@ -132,6 +132,15 @@ bench/aggregate.py      merge benchmark + LLM results into one leaderboard
 
 ## Usage
 
+### Hosting on Vercel and Railway
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the complete setup. Vercel serves `dashboard/`
+and proxies `/api/*` to a Railway Flask/Gunicorn service using the existing scoring
+pipeline. Set `BACKEND_URL` on Vercel; upload the saved model artifacts to a Railway
+volume and set `MODEL_STORE`. Hybrid OpenAI triage is available in the current
+dashboard when the GMM artifacts and `OPENAI_API_KEY` are present (the older
+generated web console described above is separate).
+
 ### Local dashboard
 
 ```bash

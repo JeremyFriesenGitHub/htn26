@@ -38,7 +38,7 @@ const scoreChip = (row) => `<span class="score-chip ${isFlagged(row) ? "flagged"
 async function api(path, options = {}) {
   let response;
   try { response = await fetch(path, options); }
-  catch { throw new Error("The local server could not be reached. Start it with python3 -m bench.dashboard and try again."); }
+  catch { throw new Error("The analysis server could not be reached. Check the backend connection and try again."); }
   let body;
   try { body = await response.json(); }
   catch { throw new Error("The server returned an unreadable response. Please try again."); }
@@ -330,6 +330,6 @@ $("close-detail").addEventListener("click",()=>$("detail-dialog").close());
 $("detail-dialog").addEventListener("click",(event)=>{if(event.target===$("detail-dialog")){const box=$("detail-dialog").getBoundingClientRect();if(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom)$("detail-dialog").close();}});
 window.addEventListener("resize",()=>{clearTimeout(state.resizeTimer);state.resizeTimer=setTimeout(()=>{if(state.run&&!$("results-panel").hidden)renderActivity();},100);});
 (async()=>{
-  try{const status=await api("/api/status");state.models=status.models;state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Local server · trained models available":"Local server · preview rules only";syncControls();}
+  try{const status=await api("/api/status");state.models=status.models;state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Analysis server · trained models available":"Analysis server · preview rules only";syncControls();}
   catch(error){$("connection").textContent="Server unavailable";showError("page-error",error.message);}
 })();

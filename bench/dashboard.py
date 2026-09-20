@@ -15,6 +15,7 @@ import importlib
 import ipaddress
 import json
 import math
+import os
 from pathlib import Path
 import re
 import socket
@@ -26,7 +27,7 @@ from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
-STORE = ROOT / "results" / "model_store"
+STORE = Path(os.environ.get("MODEL_STORE", ROOT / "results" / "model_store"))
 STATIC = ROOT / "dashboard"
 MAX_LINE_BYTES = 16384
 MODEL_NAMES = {"rules": "Heuristic preview", "gmm": "Gaussian mixture", "ae": "Deep autoencoder",

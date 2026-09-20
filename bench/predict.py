@@ -13,6 +13,7 @@ line is scored against learned 'normal'. Output: each line with an anomaly score
 from __future__ import annotations
 
 import argparse
+import os
 import pickle
 from pathlib import Path
 
@@ -21,7 +22,7 @@ import pandas as pd
 
 from . import data, labels, features, models
 
-STORE = Path(__file__).resolve().parent.parent / "results" / "model_store"
+STORE = Path(os.environ.get("MODEL_STORE", Path(__file__).resolve().parent.parent / "results" / "model_store"))
 
 
 def _load_gmm():
