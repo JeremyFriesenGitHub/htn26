@@ -151,6 +151,12 @@ Open **http://127.0.0.1:8765** for the log-review dashboard. Python 3.9+ is enou
 explore the included synthetic sample; no frontend build or additional packages
 are needed. Use `--port 8766` to choose another port.
 
+The home and investigation overview is at `/`, log input at `/analyze`, and model
+methodology and benchmarks at `/models`. Individual investigations use
+`/investigations/<id>`. Browser Back and Forward preserve the active in-memory
+analysis; after a page reload or in a new tab, load a saved investigation to restore
+its records and notes. The local server and Vercel build both serve these routes.
+
 - Upload a `.log` / `.txt` file, drag and drop it, or paste Apache Common or
   Combined Log Format lines. There is no application-level file-size or total-line
   limit; available memory determines how large a batch can be processed.
@@ -166,8 +172,7 @@ are needed. Use `--port 8766` to choose another port.
   are not simulated. Current results do not expose embeddings or feature-level
   model attribution, so the UI does not invent them.
 - Use **Save investigation data** to download original records, cached model
-  results, timeline edits and notes as a portable `.json.gz` file. **Open
-  investigation** restores that save without rerunning detectors; plain JSON
+  results, timeline edits and notes as a portable `.json.gz` file. **Load saved investigation** on the Analyze page restores that save without rerunning detectors; plain JSON
   saves are also supported.
 - Rename, merge, or split episodes; annotate events; mark them important or
   benign; remove/restore events or promote history into the reconstruction.

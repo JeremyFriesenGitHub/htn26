@@ -852,8 +852,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, model_status())
             elif path == "/api/sample":
                 self._send(200, sample_payload())
-            elif path in self.static_routes:
-                filename, mime = self.static_routes[path]
+            elif path in self.static_routes or path.rstrip("/") in ("/analyze", "/models", "/investigations") or re.fullmatch(r"/investigations/[a-zA-Z0-9_:.-]+/?", path):
+                filename, mime = self.static_routes.get(path, ("index.html", "text/html; charset=utf-8"))
                 try:
                     body = (STATIC / filename).read_bytes()
                 except OSError:

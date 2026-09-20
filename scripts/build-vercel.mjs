@@ -14,7 +14,8 @@ await writeFile(new URL("config.json", output), JSON.stringify({
   version: 3,
   routes: [
     { src: "/api/(.*)", dest: `${backend.origin}/api/$1` },
-    { handle: "filesystem" }
+    { handle: "filesystem" },
+    { src: "/(?:analyze|models|investigations(?:/[a-zA-Z0-9_:.-]+)?)/?", dest: "/index.html" }
   ]
 }, null, 2));
 console.log("Built dashboard and Railway API proxy.");

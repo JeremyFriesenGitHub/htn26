@@ -17,23 +17,38 @@
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="app-header">
     <div class="header-inner">
-      <button class="brand" id="trace-home" aria-label="Trace — analyze logs"><svg class="trace-mark" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="11"/><path d="M10 12h20M20 12v16h10"/><circle cx="10" cy="12" r="3"/><circle cx="30" cy="28" r="3"/></svg><span>trace<span class="brand-dot">.</span></span></button>
+      <a class="brand" id="trace-home" href="/" data-view="investigations" aria-label="Trace home"><svg class="trace-mark" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="11"/><path d="M10 12h20M20 12v16h10"/><circle cx="10" cy="12" r="3"/><circle cx="30" cy="28" r="3"/></svg><span>trace<span class="brand-dot">.</span></span></a>
       <nav class="primary-nav" aria-label="Main navigation">
-        <button class="nav-link" data-view="analyze" aria-current="page">Analyze</button>
-        <button class="nav-link" data-view="investigations">Investigations</button>
-        <button class="nav-link" data-view="models">Models</button>
+        <a class="nav-link" href="/" data-view="investigations">Investigate</a>
+        <a class="nav-link" href="/analyze" data-view="analyze">Analyze</a>
+        <a class="nav-link" href="/models" data-view="models">Models</a>
       </nav>
-      <div class="header-actions"><span id="connection" class="connection" role="status">Connecting…</span><button id="load-session" class="button secondary">Open investigation</button></div>
     </div>
   </header>
   <main id="main">
-    <input id="session-file" type="file" accept=".json,.json.gz,.gz,application/json,application/gzip" hidden>
-    <section id="investigations-empty" class="panel nav-empty" aria-labelledby="empty-title" hidden><span class="eyebrow">Your workspace</span><h2 id="empty-title">Every investigation starts with a trace.</h2><p>Analyze a log file to explore related requests, reconstruct events, and keep notes. You can also open a saved investigation above.</p><button class="button primary" id="empty-analyze">Analyze logs <span aria-hidden="true">→</span></button></section>
-    <section id="models-panel" aria-labelledby="models-title" hidden><div class="page-intro"><span class="eyebrow">Detection</span><h2 id="models-title">Find the right perspective.</h2><p>Explore the detectors available on this server. Each looks for unusual activity in a different way.</p></div><div id="model-catalog" class="model-catalog"><p>Checking available models…</p></div></section>
+    <section id="investigations-empty" class="home-guide" aria-labelledby="home-title" hidden>
+      <p id="resume-route" class="run-notice" hidden>This investigation is not loaded in this tab. <a href="/analyze?input=session" id="resume-saved">Load its saved investigation</a> to continue.</p><div class="home-hero"><h1 id="home-title">Every investigation starts with a trace.</h1><p>Trace helps you move from access logs to an investigation you can explain.</p><a class="button primary" href="/analyze" data-view="analyze">Analyze logs <span aria-hidden="true">→</span></a></div>
+      <div class="workflow-section"><h2>From log file to investigation</h2><ol class="workflow-diagram" aria-label="Investigation workflow">
+        <li><span class="step-index">01</span><h3>Analyze your logs</h3><p>Upload a file or paste requests. A trained detector ranks unusual behavior against its learned baseline.</p><div class="step-visual log-lines" aria-hidden="true"><i></i><i></i><i class="anomalous"></i><i></i></div></li>
+        <li><span class="step-index">02</span><h3>Review the context</h3><p>Open a candidate time range. Inspect original requests, nearby events and earlier account activity.</p><div class="step-visual sequence" aria-hidden="true"><i></i><b></b><i class="anomalous"></i><b></b><i></i></div></li>
+        <li><span class="step-index">03</span><h3>Document your findings</h3><p>Retain evidence, arrange episodes and add notes. Save the investigation or export a report with the original records.</p><div class="step-visual evidence-sheet" aria-hidden="true"><i></i><i></i><i></i></div></li>
+      </ol></div>
+      <div class="home-explainer"><div><h2>How detection works</h2><p>Requests become features describing account and source history, endpoint rarity, response patterns and short bursts of activity. Models trained on earlier traffic score unusual combinations.</p><p>A high anomaly percentile puts a request near the top of the learned baseline. Ordinary-looking requests can still be important evidence.</p><a href="/models" class="text-button">Explore the models and benchmarks →</a></div></div>
+    </section>
+    <section id="models-panel" aria-labelledby="models-title" hidden>
+      <div class="page-intro"><h1 id="models-title">Models</h1><p>The models on this site were trained on the Log &amp; Order challenge dataset, which contains 180,800 access-log requests from August 2025 through March 2026.<br>They provide a working example of detecting unusual activity in an organization’s traffic.</p></div>
+      <div id="model-catalog" class="model-catalog" aria-label="Available models"></div>
+      <section class="method-section"><h2>Training</h2><p>The deployed Gaussian mixture and deep autoencoder models were fitted on requests recorded from August 2025 through February 2026. Each request is represented by features describing account and source-address history, endpoint rarity, response patterns and recent request bursts. For example, a successful response for a resource that an account was previously denied contributes to its anomaly score.</p></section>
+      <section class="method-section"><h2>Benchmarks</h2><p>The benchmark compares how effectively each method ranks unusual requests in the challenge dataset. Models were fitted on August–January traffic, with settings selected using simulated anomalies in February. March traffic was reserved for evaluation against 22 manually annotated requests, including two contextual records.</p><p>The table shows the research comparison used to assess the detection methods. The deployed models were subsequently fitted on the full August–February history. “Contextual” features incorporate earlier account behavior; “Raw fields” use the seven access-log fields directly.</p><div class="table-scroll"><table class="benchmark-table"><thead><tr><th>Detector</th><th>Features</th><th>PR-AUC</th><th>95% interval</th><th>Reference hits in top 50</th></tr></thead><tbody>
+      <tr><td>Deep autoencoder ensemble ×7</td><td>Contextual</td><td>0.918</td><td>0.79–1.00</td><td>20 / 22</td></tr><tr><td>Gaussian mixture · 4 components</td><td>Contextual</td><td>0.909</td><td>0.77–1.00</td><td>20 / 22</td></tr><tr><td>Rank ensemble</td><td>Contextual</td><td>0.907</td><td>0.77–1.00</td><td>20 / 22</td></tr><tr><td>Context novelty baseline</td><td>Contextual</td><td>0.867</td><td>0.71–1.00</td><td>19 / 22</td></tr><tr><td>ECOD</td><td>Contextual</td><td>0.862</td><td>0.70–0.99</td><td>19 / 22</td></tr><tr><td>K-Means</td><td>Contextual</td><td>0.836</td><td>Not reported</td><td>20 / 22</td></tr><tr><td>K-Means</td><td>Raw fields</td><td>0.646</td><td>Not reported</td><td>16 / 22</td></tr>
+      </tbody></table></div><p class="field-hint">PR-AUC summarizes precision and recall across score thresholds; higher values indicate better separation of the annotated requests. “Reference hits in top 50” counts how many of the 22 annotated requests appear in the first 50 results. The 95% intervals were estimated from 1,000 bootstrap samples. These results describe one annotated incident, and the overlapping intervals for GMM and the deep ensemble do not demonstrate a clear performance difference.</p></section>
+
+    </section>
     <div id="page-error" class="error-message" role="alert" hidden></div>
-    <section id="input-panel" class="panel input-panel" aria-labelledby="input-title">
-      <div class="panel-heading"><div><span class="eyebrow">Start an investigation</span><h2 id="input-title">Follow the trace.</h2><p>Upload an Apache log file or paste requests to find unusual activity.</p></div><button id="load-sample" class="button secondary">Try example.txt</button></div>
-      <div class="input-tabs" role="group" aria-label="Log input method"><button id="tab-file" class="tab active" aria-pressed="true">Upload a file</button><button id="tab-paste" class="tab" aria-pressed="false">Paste logs</button></div>
+    <section id="input-panel" hidden class="panel input-panel" aria-labelledby="input-title">
+      <div class="panel-heading"><div><span class="eyebrow">Start an investigation</span><p>Upload an Apache log file or paste requests to find unusual activity.</p></div><button id="load-sample" class="button secondary">Try sample data</button></div>
+      <div class="input-tabs" role="group" aria-label="Log input method"><button id="tab-file" class="tab active" aria-pressed="true">Upload a file</button><button id="tab-paste" class="tab" aria-pressed="false">Paste logs</button><button id="tab-session" class="tab" aria-pressed="false">Load saved investigation</button></div>
+      <div id="session-input-panel" hidden><label class="dropzone" for="session-file"><span data-icon="upload"></span><strong>Choose a saved investigation</strong><span>.json or .json.gz · restores records, model results and notes</span><input id="session-file" type="file" accept=".json,.json.gz,.gz,application/json,application/gzip" class="sr-only"></label><p id="session-load-status" role="status" class="field-hint" hidden>Loading saved records and notes…</p></div>
       <form id="analyze-form">
         <div id="file-input-panel">
           <label class="dropzone" id="dropzone" for="log-file"><span data-icon="upload"></span><strong>Choose a log file <span>or drag it here</span></strong><span>Apache Common or Combined Log Format · .log / .txt</span><input id="log-file" type="file" accept=".log,.txt,text/plain" class="sr-only"></label>
@@ -46,12 +61,11 @@
         <div id="analyze-error" class="error-message" role="alert" hidden></div>
         <div id="processing-progress" class="processing-progress" hidden><div class="progress-heading"><strong id="progress-stage">Preparing analysis</strong><span id="progress-count"></span></div><progress id="progress-bar" max="100" aria-label="Analysis progress"></progress><p id="progress-message" role="status" aria-live="polite"></p></div>
       </form>
-      <div class="input-footer"><span id="privacy-note">Processed on the analysis server. No external AI calls.</span> <button class="text-button" id="cancel-input" hidden>Return to results</button></div>
     </section>
     <section id="results-panel" aria-labelledby="results-title" hidden>
       <div class="results-heading">
-        <div><h2 id="results-title">Investigations found</h2><p id="run-description"></p></div>
-        <div class="export-actions"><button class="button secondary" id="save-session">Save investigation data</button><button class="button secondary" id="new-analysis"><span data-icon="upload"></span>New analysis</button></div>
+        <div><h2 id="results-title"></h2><p id="run-description"></p></div>
+        <div class="export-actions"><button class="button secondary" id="save-session"><span data-icon="upload"></span><span>Save investigation data</span></button></div>
       </div>
       <div id="run-notice" class="run-notice" hidden></div>
 
@@ -59,12 +73,10 @@
         <div class="overview-intro"><p>Follow related requests from the first unusual event to the last.</p><p class="field-hint">The selected detector supplies the candidates. Account and timing connect them into investigations you can review and refine.</p></div>
         <div class="overview-filters" role="search" aria-label="Find an investigation">
           <label class="overview-search" for="investigation-search">Search investigations<input id="investigation-search" type="search" placeholder="Account, source IP, or request target"></label>
-          <label for="investigation-account">Account<select id="investigation-account"><option value="">All accounts</option></select></label>
-          <label for="investigation-cutoff"><span id="investigation-cutoff-label">Review cutoff</span><span class="cutoff-input"><input id="investigation-cutoff" type="number" min="0" max="100" step="0.01" value="75" aria-describedby="investigation-cutoff-help"><span>/ 100</span></span></label>
+          <div class="confidence-control"><div class="confidence-label"><label for="investigation-cutoff">Model confidence</label><span class="score-info"><button type="button" id="confidence-info" aria-label="About model confidence" aria-describedby="confidence-tooltip">ⓘ</button><span id="confidence-tooltip" class="score-tooltip" role="tooltip">Anomaly percentile relative to the model baseline. Higher values keep fewer, more unusual requests. This is not an attack probability.</span></span></div><div class="confidence-slider"><input id="investigation-cutoff" type="range" min="0" max="100" step="0.001" value="100"><output id="cutoff-value" for="investigation-cutoff">100%</output></div><div class="confidence-scale"><span>More requests</span><span>More selective</span></div></div>
         </div>
-        <p id="investigation-cutoff-help" class="field-hint overview-filter-help">The cutoff chooses which requests enter the reconstruction. It is not attack confidence.</p>
         <section class="panel overview-activity" aria-labelledby="overview-activity-title">
-          <div class="section-heading"><h3 id="overview-activity-title">When candidate requests occurred</h3><label class="checkbox-label"><input id="show-other-traffic" type="checkbox">Include other traffic</label></div>
+          <div class="section-heading"><h3 id="overview-activity-title">When candidate requests occurred</h3><label class="checkbox-label"><input id="show-other-traffic" type="checkbox" checked>Include other traffic</label></div>
           <div id="overview-timeline-chart" class="activity-chart"></div>
           <p id="overview-chart-caption" class="chart-caption"></p>
         </section>

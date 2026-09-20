@@ -100,9 +100,11 @@ function syncControls() {
   const hasInput = state.inputMode === "file" ? Boolean(state.file) : Boolean($("log-input").value.trim());
   $("analyze-submit").disabled = !state.ready || state.busy || state.reading || !hasInput || !state.models.some((model)=>model.available&&model.id===$("model-select").value);
   $("analyze-submit").lastElementChild.textContent = state.busy ? "Analyzing…" : state.reading ? "Reading file…" : "Analyze logs";
-  for (const id of ["load-sample","model-select","log-input","log-file","remove-file","tab-file","tab-paste"]) $(id).disabled = state.busy;
+  for (const id of ["load-sample","model-select","log-input","log-file","remove-file","tab-file","tab-paste","tab-session","session-file"]) $(id).disabled = state.busy;
   $("load-sample").disabled = !state.ready || state.busy || state.reading || !state.models.some((model)=>model.available&&model.id===$("model-select").value);
-  $("cancel-input").disabled = state.busy;
+  $("model-select").disabled = state.busy || !state.ready || !state.models.some((model)=>model.available);
+  $("session-file").disabled = state.busy || state.reading || state.modelBusy;
+  $("session-load-status").hidden = !state.reading;
   if (state.reading) updateProgress({stage:"file",message:"Reading your file. There is no upload size limit."});
   $("processing-progress").hidden = !state.busy && !state.reading;
   $("input-panel").setAttribute("aria-busy", String(state.busy || state.reading));
@@ -110,55 +112,85 @@ function syncControls() {
 
 function switchInput(mode) {
   state.inputMode = mode;
-  for (const option of ["file","paste"]) {
+  for (const option of ["file","paste","session"]) {
     $(option + "-input-panel").hidden = mode !== option;
     $("tab-" + option).classList.toggle("active", mode === option);
     $("tab-" + option).setAttribute("aria-pressed", String(mode === option));
   }
+  $("analyze-form").hidden = mode === "session";
+  $("load-sample").hidden = mode === "session";
   showError("analyze-error"); syncControls();
 }
+const routes = {investigations:"/", analyze:"/analyze", models:"/models"};
+function routeTo(path, replace=false) {
+  if(location.pathname + location.search !== path) history[replace?"replaceState":"pushState"]({},"",path);
+}
 function setView(view) {
-  for (const button of document.querySelectorAll("[data-view]")) {
-    if (button.dataset.view === view) button.setAttribute("aria-current", "page");
-    else button.removeAttribute("aria-current");
+  for (const link of document.querySelectorAll(".primary-nav [data-view]")) {
+    if (link.dataset.view === view) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
   }
   $("models-panel").hidden = view !== "models";
   $("investigations-empty").hidden = view !== "investigations" || Boolean(state.run);
-  document.title = `Trace · ${{analyze:"Analyze logs",investigations:"Investigations",models:"Models"}[view]}`;
+  document.title = `Trace · ${{analyze:"Analyze logs",investigations:state.source||"Investigations",models:"Models"}[view]}`;
+}
+function renderRoute() {
+  const path = location.pathname.replace(/\/$/, "") || "/";
+  if(path === "/analyze") {
+    setView("analyze"); $("input-panel").hidden=false; $("results-panel").hidden=true;
+    const mode=new URLSearchParams(location.search).get("input");
+    switchInput(["file","paste","session"].includes(mode)?mode:"file");
+  } else if(path === "/models") {
+    setView("models"); $("input-panel").hidden=true; $("results-panel").hidden=true; renderModelCatalog();
+  } else {
+    setView("investigations"); $("input-panel").hidden=true; $("results-panel").hidden=!state.run;
+    $("resume-route").hidden=Boolean(state.run)||!path.startsWith("/investigations/");
+    if(state.run) {
+      const id=path.startsWith("/investigations/")?path.slice(16):null;
+      if(id&&caseById(id)) openCase(id,false);
+      else {state.caseId=null;state.selection=null;renderOverview();}
+    }
+  }
 }
 function navigate(view) {
   if (state.busy || state.reading || state.modelBusy) { toast("Let the current analysis finish before switching views."); return; }
-  if (view === "analyze") showInput();
-  else if (view === "investigations") {
-    setView(view);
-    $("input-panel").hidden = true;
-    $("results-panel").hidden = !state.run;
-    if (state.run) { state.caseId = null; state.selection = null; renderOverview(); }
-  } else {
-    setView("models");
-    $("input-panel").hidden = true;
-    $("results-panel").hidden = true;
-    renderModelCatalog();
-  }
+  if(cutoffTimer!==null)applyCutoff();
+  routeTo(routes[view]||"/"); renderRoute();
 }
+window.addEventListener("popstate",()=>{if(cutoffTimer!==null)applyCutoff();renderRoute();});
+const servedModelDescriptions = {
+  gmm: "The Gaussian mixture model learns the distribution of standardized request features. The challenge configuration uses four components with diagonal covariance. Requests with combinations of features that are uncommon in the training data receive higher anomaly scores.",
+  ae: "The deep autoencoder ensemble learns to reconstruct request features using seven neural networks. Each network is trained with regularization and early stopping. The model averages normalized reconstruction errors, assigning higher scores to requests whose features differ from the patterns learned during training.",
+  hybrid: "This optional review combines GMM scoring with external LLM triage. GMM ranks the requests first, then shortlisted records and historical account context are sent to OpenAI. It uses the trained GMM and does not train a separate detector."
+};
 function renderModelCatalog() {
   const models = state.models.filter((model) => model.available);
-  $("model-catalog").innerHTML = models.length ? models.map((model) => `<article class="panel model-card"><div class="model-card-heading"><h3>${escapeHTML(model.name)}</h3></div><p>${escapeHTML(model.detail)}</p><button class="button secondary" data-use-model="${escapeHTML(model.id)}">Use this model →</button></article>`).join("") : "<p>No models are currently available.</p>";
+  $("model-catalog").innerHTML = models.length ? models.map((model) => `<article class="panel model-card"><div class="model-card-heading"><h3>${escapeHTML(model.name)}</h3></div><p>${escapeHTML(servedModelDescriptions[model.id]||model.detail)}</p><button class="button secondary" data-use-model="${escapeHTML(model.id)}">Use this model →</button></article>`).join("") : "<p>No models are currently available.</p>";
 }
-for (const button of document.querySelectorAll("[data-view]")) button.addEventListener("click", () => navigate(button.dataset.view));
-$("trace-home").addEventListener("click", () => navigate("analyze"));
-$("empty-analyze").addEventListener("click", () => navigate("analyze"));
+for (const link of document.querySelectorAll("[data-view]")) link.addEventListener("click", (event) => {
+  if(event.metaKey||event.ctrlKey||event.shiftKey||event.altKey)return;
+  event.preventDefault();navigate(link.dataset.view);
+});
 $("model-catalog").addEventListener("click", (event) => {
   const button = event.target.closest("[data-use-model]");
   if (!button || button.disabled || state.busy || state.reading || state.modelBusy) return;
-  navigate("analyze"); $("model-select").value = button.dataset.useModel; modelHelp(); $("model-select").focus();
+  navigate("analyze"); $("model-select").value = button.dataset.useModel; modelHelp(); $("model-select").focus();syncControls();
 });
-function showInput() {
-  setView("analyze");
-  $("input-panel").hidden = false; $("results-panel").hidden = true;
-  $("cancel-input").hidden = !state.run;
+function showInput() { navigate("analyze"); }
+function showResults() {
+  routeTo(state.caseId?`/investigations/${encodeURIComponent(state.caseId).replace(/%3A/gi,":")}`:"/");
+  setView("investigations"); $("input-panel").hidden=true; $("results-panel").hidden=false;
+  if(state.run) {if(state.caseId)renderWorkspace();else renderOverview();}
 }
-function showResults() { setView("investigations"); $("input-panel").hidden = true; $("results-panel").hidden = false; if(state.run) { if(state.caseId)renderWorkspace(); else renderOverview(); } }
+function updateCutoffLabel() {
+  const value=Number($("investigation-cutoff").value);
+  $("cutoff-value").textContent=`${Number(value.toFixed(3))}%`;
+  $("investigation-cutoff").setAttribute("aria-valuetext",`${value} percentile`);
+}
+function caseTimeRange(item) {
+  const ids=new Set(item.candidateIds),rows=item.rows.filter((row)=>ids.has(row.id)).sort((a,b)=>a.time-b.time);
+  return `${shortTime(rows[0]?.time??item.start)} – ${shortTime(rows[rows.length-1]?.time??item.end)}`;
+}
 function fileSize(bytes) { return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
 function lineCount(logs) { return logs.split("\n").reduce((total, line) => total + (line.trim() ? 1 : 0), 0); }
 function renderFile() {
@@ -185,10 +217,6 @@ async function readFile(file) {
 }
 function modelHelp() {
   const model = state.models.find((item) => item.id === $("model-select").value);
-  const privacy = $("privacy-note");
-  if (privacy) privacy.textContent = model?.id === "hybrid"
-    ? "LLM triage sends the detector's top matches to OpenAI. Other requests stay on the analysis server."
-    : "Processed on the analysis server. No external AI calls.";
   if (model?.id === "hybrid") { $("model-help").textContent = "The GMM ranks every line on the analysis server, then only its top slice is sent to OpenAI for review with each user\u2019s normal-access profile. This is the only option that sends log data to an external AI service."; return; }
   $("model-help").textContent = model ? "Ranks requests using the saved model. Results show the raw anomaly score and its training-baseline percentile separately; neither is attack confidence." : "No model information available.";
 }
@@ -216,10 +244,9 @@ async function analyze(logs,model,source,synthetic=false) {
     state.rowsById=run.rowsById;state.caseId=null;state.selection=null;state.edits=new Map();
     state.dispositions=new Map();state.eventNotes=new Map();state.investigations=[];state.query="";state.account="";state.overviewPage=1;
     $("investigation-search").value="";$("investigation-cutoff").value=String(Number((state.threshold*100).toFixed(5)));
-    $("investigation-cutoff-label").textContent=run.mode==="heuristic"?"Rule score cutoff":"Percentile cutoff";
-    $("investigation-account").innerHTML='<option value="">All accounts</option>'+Review.accountCounts(run.rows).map(([account])=>`<option value="${escapeHTML(account)}">${escapeHTML(accountName(account))}</option>`).join("");
-    $("results-title").textContent="Investigations found";
-    $("run-description").textContent=`${source} · ${number(run.rows.length)} requests · ${run.model_name}`;
+    updateCutoffLabel();
+    $("results-title").textContent=source;
+    $("run-description").textContent=`${number(run.rows.length)} requests · ${run.model_name}`;
     $("run-notice").textContent=[run.warning||"",run.external?"Shortlisted requests were sent to OpenAI for review.":""].filter(Boolean).join(" ");
     $("run-notice").hidden=!$("run-notice").textContent;
     rebuildInvestigations();showResults();toast(`${number(state.investigations.length)} candidate investigations found.`);
@@ -288,33 +315,36 @@ function renderOverview(){
   $("overview-panel").hidden=false;$("investigation-workspace").hidden=true;
   const query=state.query.trim().toLowerCase();
   if($("overview-activity-title"))$("overview-activity-title").textContent=$("show-other-traffic").checked?"Requests around candidate investigations":"When candidate requests occurred";
-  const matches=state.investigations.filter((item)=>(!state.account||(item.grouping?.manual?caseRows(item).some((row)=>row.user===state.account):item.account===state.account))&&(!query||[item.title||"",item.account,...item.sources,...item.rows.map((row)=>`${row.method} ${row.path} ${row.status}`)].join(" ").toLowerCase().includes(query)));
+  const matches=state.investigations.filter((item)=>(!query||[item.title||"",item.account,...item.sources,...item.rows.map((row)=>`${row.method} ${row.path} ${row.status}`)].join(" ").toLowerCase().includes(query)));
   const pages=Math.max(1,Math.ceil(matches.length/8));state.overviewPage=Math.min(state.overviewPage,pages);
   const shown=matches.slice((state.overviewPage-1)*8,state.overviewPage*8);
   $("overview-counts").textContent=`${number(matches.length)} candidate investigations · ${number(matches.reduce((sum,item)=>sum+item.candidateIds.length,0))} detector candidates · ${matches.some((item)=>item.grouping?.manual)?"includes analyst reconstructions":"grouped by account and time"}`;
-  $("investigation-list").innerHTML=shown.map((item)=>`<article class="investigation-card"><div class="investigation-card-heading"><div><h3>${escapeHTML(item.title||accountName(item.account))}</h3><p class="investigation-card-meta">${shortTime(item.start)} – ${shortTime(item.end)}</p></div><button class="button primary" data-open-case="${escapeHTML(item.id)}">Open investigation</button></div><p class="investigation-card-meta">${number(item.candidateIds.length)} candidate requests · ${number(item.sources.length)} source IP${item.sources.length===1?"":"s"} · ${escapeHTML(item.sources.slice(0,3).join(", "))}${item.sources.length>3?" …":""}</p><p class="investigation-progression">${caseProgression(item).map(escapeHTML).join(' <span aria-hidden="true">→</span> ')}</p><p class="investigation-models">${item.savedOnly?"Saved analyst reconstruction at its original cutoff. ":""}${item.grouping?.manual?"Analyst reconstruction; detector scores are supporting evidence.":`Detected by ${escapeHTML(state.run.model_name)}.`} ${number(item.rows.length-item.candidateIds.length)} ${item.grouping?.manual?"additional evidence records":"nearby requests available as context"}.</p></article>`).join("");
-  $("overview-empty").hidden=matches.length>0;$("overview-empty").textContent=state.investigations.length?"No investigations match this account or search. Clear those filters to see the other investigations.":"No requests meet this cutoff. Lower it to broaden the investigation.";
+  $("investigation-list").innerHTML=shown.map((item)=>`<article class="investigation-card"><div class="investigation-card-heading"><div><h3>${escapeHTML(caseTimeRange(item))}</h3><p class="investigation-card-meta">${escapeHTML(accountName(item.account))}</p></div><button class="button primary" data-open-case="${escapeHTML(item.id)}">Open investigation</button></div><p class="investigation-card-meta">${number(item.candidateIds.length)} candidate requests · ${number(item.sources.length)} source IP${item.sources.length===1?"":"s"} · ${escapeHTML(item.sources.slice(0,3).join(", "))}${item.sources.length>3?" …":""}</p><p class="investigation-progression">${caseProgression(item).map(escapeHTML).join(' <span aria-hidden="true">→</span> ')}</p><p class="investigation-models">${item.savedOnly?"Saved analyst reconstruction at its original cutoff. ":""}${item.grouping?.manual?"Analyst reconstruction; detector scores are supporting evidence.":`Detected by ${escapeHTML(state.run.model_name)}.`} ${number(item.rows.length-item.candidateIds.length)} ${item.grouping?.manual?"additional evidence records":"nearby requests available as context"}.</p></article>`).join("");
+  $("overview-empty").hidden=matches.length>0;$("overview-empty").textContent=state.investigations.length?"No investigations match your search.":"No requests meet this cutoff. Lower it to broaden the investigation.";
   $("overview-page").textContent=`${state.overviewPage} / ${pages}`;$("overview-previous").disabled=state.overviewPage<=1;$("overview-next").disabled=state.overviewPage>=pages;
   if($("overview-timeline-chart")){
     const ids=new Set(matches.flatMap((item)=>item.candidateIds));
-    const chartRows=state.run.rows.filter((row)=>(!state.account||row.user===state.account)&&(!query||ids.has(row.id)));
-    const chart=window.LogCharts.renderActivity($("overview-timeline-chart"),{rows:chartRows,isFlagged:(row)=>ids.has(row.id),showAll:$("show-other-traffic").checked,onSelect:(group)=>{
-      const match=matches.find((item)=>item.start<group.end&&item.end>=group.start);if(match)openCase(match.id);
+    const chartRows=state.run.rows.filter((row)=>(!query||ids.has(row.id)));
+    const chart=window.LogCharts.renderActivity($("overview-timeline-chart"),{rows:chartRows,thresholdPreview:true,isFlagged:(row)=>ids.has(row.id),showAll:$("show-other-traffic").checked,onSelect:(group)=>{
+      applyCutoff();
+      const match=state.investigations.find((item)=>item.start<group.end&&item.end>=group.start);if(match)openCase(match.id);
     }});
+    state.activityChart=chart;
     $("overview-chart-caption").textContent=chart.caption.replace("view its requests","open a matching investigation");
   }
 }
-function openCase(id){
+function openCase(id, push=true){
   const item=caseById(id);if(!item)return;state.caseId=item.id;state.episodeLimit=12;state.eventLimits=new Map();
   const episodes=editsFor(item).episodes;const first=episodes.find((episode)=>episode.rows.some(isCandidate))||episodes[0];
   state.selection=first?{type:"episode",id:first.id}:null;
+  if(push)routeTo(`/investigations/${encodeURIComponent(item.id).replace(/%3A/gi,":")}`);
   renderWorkspace();$("investigation-title").focus({preventScroll:true});$("investigation-workspace").scrollIntoView({block:"start"});
 }
 function renderWorkspace(){
   const item=caseById();if(!item)return;
   $("overview-panel").hidden=true;$("investigation-workspace").hidden=false;
   const retained=caseRows(item),ids=candidateIds(item),candidates=retained.filter((row)=>ids.has(row.id)),candidateSources=new Set(candidates.map((row)=>row.ip));
-  $("investigation-title").textContent=item.title||`${item.savedOnly?"Saved investigation":"Investigation"}: ${accountName(item.account)}`;
+  $("investigation-title").textContent=caseTimeRange(item);
   $("investigation-title").setAttribute("tabindex","-1");
   const observedSources=[...new Set(retained.map((row)=>row.ip))],observedAccounts=[...new Set(retained.map((row)=>accountName(row.user)))];
   $("investigation-meta").textContent=`${item.grouping?.manual?"Reconstruction window":"Candidate window"}: ${shortTime(item.start)} – ${shortTime(item.end)} · Evidence sources: ${observedSources.join(", ")}`;
@@ -407,7 +437,7 @@ function renderModelEvidence(){
 async function runEvidenceModel(){
   if(state.modelBusy||!state.run)return;
   const model=state.activeModel,revision=state.revision,originalRun=state.run;
-  state.modelBusy=true;$("new-analysis").disabled=true;renderModelEvidence();
+  state.modelBusy=true;renderModelEvidence();
   try{
     const run=await prepareRun(await predictStream(state.logs,model,(progress)=>{
       $("model-run-status").textContent=`${progress.message||progress.stage||"Processing"}${Number.isFinite(progress.completed)&&progress.total?` · ${number(progress.completed)} / ${number(progress.total)}`:""}`;
@@ -416,7 +446,7 @@ async function runEvidenceModel(){
     if(run.rows.length!==originalRun.rows.length||run.rows.some((row)=>originalRun.rowsById.get(row.id)?.raw!==row.raw))throw new Error("The detector returned records that do not match this upload. Its results were not attached.");
     state.runs.set(model,run);$("model-run-status").textContent=`${run.model_name} complete. Selection and reconstruction preserved.`;
   }catch(error){$("model-run-status").textContent=error.message;}
-  finally{state.modelBusy=false;$("new-analysis").disabled=false;renderModelEvidence();}
+  finally{state.modelBusy=false;renderModelEvidence();}
 }
 function renderBaseline(){
   const item=caseById();if(!item)return;
@@ -495,12 +525,11 @@ async function restoreSession(saved){
   state.source=String(saved.source||"Saved investigation");state.synthetic=Boolean(saved.synthetic);state.threshold=threshold;
   state.activeModel=runs.has(saved.active_model)?saved.active_model:saved.base_model;state.investigations=investigations;state.edits=edits;state.dispositions=dispositions;state.eventNotes=eventNotes;
   state.caseId=investigations.some((item)=>item.id===saved.caseId)?saved.caseId:null;state.selection=validSelection?selection:selectedEpisodes.length?{type:"episode",id:selectedEpisodes[0].id}:null;
-  state.query=String(saved.query||"");state.account=String(saved.account||"");state.includeContext=saved.includeContext!==false;state.overviewPage=1;state.episodeLimit=12;state.eventLimits=new Map();
+  state.query=String(saved.query||"");state.account="";state.includeContext=saved.includeContext!==false;state.overviewPage=1;state.episodeLimit=12;state.eventLimits=new Map();
   for(const [id,cached] of runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:cached.model_name||id,available:false});
   $("investigation-search").value=state.query;$("investigation-cutoff").value=String(Number((threshold*100).toFixed(5)));
-  $("investigation-cutoff-label").textContent=run.mode==="heuristic"?"Rule score cutoff":"Percentile cutoff";
-  $("investigation-account").innerHTML='<option value="">All accounts</option>'+Review.accountCounts(run.rows).map(([account])=>`<option value="${escapeHTML(account)}">${escapeHTML(accountName(account))}</option>`).join("");$("investigation-account").value=state.account;
-  $("results-title").textContent="Saved investigations";$("run-description").textContent=`${state.source} · ${number(run.rows.length)} requests · ${runs.size} saved detector results`;
+  updateCutoffLabel();
+  $("results-title").textContent=state.source;$("run-description").textContent=`${number(run.rows.length)} requests · ${runs.size} saved detector results`;
   $("run-notice").textContent="Loaded saved results and analyst notes. No detectors were run.";$("run-notice").hidden=false;
   showResults();toast("Investigation restored, including model results and notes.");
 }
@@ -584,9 +613,7 @@ function promoteExternalContext(row){
   editsFor(item).episodes.push(episode);editsFor(item).episodes.sort((a,b)=>a.rows[0].time-b.rows[0].time);
 }
 for(const element of document.querySelectorAll("[data-icon]"))element.innerHTML=icon(element.dataset.icon);
-for(const mode of ["file","paste"])$("tab-"+mode).addEventListener("click",()=>switchInput(mode));
-$("new-analysis").addEventListener("click",()=>{if(!state.modelBusy)showInput();});
-$("cancel-input").addEventListener("click",showResults);
+for(const mode of ["file","paste","session"])$("tab-"+mode).addEventListener("click",()=>{routeTo(`/analyze?input=${mode}`);switchInput(mode);});
 $("model-select").addEventListener("change",()=>{modelHelp();syncControls();});
 $("log-input").addEventListener("input",()=>{$("paste-count").textContent=`${number(lineCount($("log-input").value))} requests`;syncControls();});
 $("log-file").addEventListener("change",async()=>{await readFile($("log-file").files[0]);$("log-file").value="";});
@@ -610,16 +637,39 @@ $("load-sample").addEventListener("click",async()=>{
   finally{if(revision===state.revision){state.reading=false;syncControls();}}
 });
 $("investigation-search").addEventListener("input",()=>{clearTimeout(state.searchTimer);state.query=$("investigation-search").value;state.overviewPage=1;state.searchTimer=setTimeout(renderOverview,180);});
-$("investigation-account").addEventListener("change",()=>{state.account=$("investigation-account").value;state.overviewPage=1;renderOverview();});
-$("investigation-cutoff").addEventListener("change",()=>{
-  const value=Number($("investigation-cutoff").value);if(!Number.isFinite(value)||$("investigation-cutoff").value===""){$("investigation-cutoff").value=String(state.threshold*100);return;}
-  state.threshold=Math.max(0,Math.min(100,value))/100;$("investigation-cutoff").value=String(state.threshold*100);state.caseId=null;state.overviewPage=1;rebuildInvestigations();
+let cutoffFrame = null, cutoffTimer = null;
+function applyCutoff() {
+  const pending=cutoffTimer!==null||cutoffFrame!==null;
+  clearTimeout(cutoffTimer);cutoffTimer=null;
+  if(cutoffFrame!==null){cancelAnimationFrame(cutoffFrame);cutoffFrame=null;}
+  const value=Number($("investigation-cutoff").value);
+  if(!state.run||!Number.isFinite(value))return;
+  const threshold=Math.max(0,Math.min(100,value))/100;
+  if(threshold===state.threshold){if(pending)renderOverview();return;}
+  state.threshold=threshold;state.caseId=null;state.overviewPage=1;
+  rebuildInvestigations();
+}
+$("investigation-cutoff").addEventListener("input",()=>{
+  updateCutoffLabel();
+  if(cutoffFrame===null)cutoffFrame=requestAnimationFrame(()=>{
+    cutoffFrame=null;
+    const count=state.activityChart?.updateThreshold(Number($("investigation-cutoff").value)/100);
+    if(count!==undefined)$("overview-chart-caption").textContent=`${number(count)} candidates in this chart · updating investigations after adjustment`;
+  });
+  clearTimeout(cutoffTimer);
+  cutoffTimer=setTimeout(applyCutoff,250);
 });
+$("investigation-cutoff").addEventListener("change",()=>{updateCutoffLabel();applyCutoff();});
+const confidenceInfo=$("confidence-info"),confidenceHelp=confidenceInfo.parentElement;
+confidenceHelp.addEventListener("mouseenter",()=>confidenceHelp.classList.remove("dismissed"));
+confidenceInfo.addEventListener("focus",()=>confidenceHelp.classList.remove("dismissed"));
+confidenceInfo.addEventListener("click",()=>confidenceHelp.classList.remove("dismissed"));
+confidenceInfo.addEventListener("keydown",(event)=>{if(event.key==="Escape")confidenceHelp.classList.add("dismissed");});
 $("investigation-list").addEventListener("click",(event)=>{const target=event.target.closest("[data-open-case]");if(target)openCase(target.dataset.openCase);});
 $("overview-previous").addEventListener("click",()=>{state.overviewPage--;renderOverview();});
 $("overview-next").addEventListener("click",()=>{state.overviewPage++;renderOverview();});
 $("show-other-traffic").addEventListener("change",renderOverview);
-$("back-investigations").addEventListener("click",()=>{state.caseId=null;state.selection=null;renderOverview();$("results-title").scrollIntoView({block:"start"});});
+$("back-investigations").addEventListener("click",()=>navigate("investigations"));
 $("include-context").addEventListener("change",()=>{state.includeContext=$("include-context").checked;renderEpisodes();});
 $("restore-events").addEventListener("click",()=>{for(const row of caseById().rows)if(disposition(row)==="excluded")state.dispositions.delete(dispositionKey(row));renderWorkspace();});
 $("add-investigation-note").addEventListener("input",()=>{editsFor(caseById()).note=$("add-investigation-note").value;$("investigation-notes").textContent="Note kept in this session and included in the report.";});
@@ -646,6 +696,7 @@ $("evidence-workspace").addEventListener("input",(event)=>{if(event.target.id===
 $("evidence-model").addEventListener("change",()=>{state.activeModel=$("evidence-model").value;$("model-run-status").textContent="";renderModelEvidence();});
 $("save-session").addEventListener("click",async()=>{
   if(!state.run||state.modelBusy||state.busy||$("save-session").disabled)return;
+  if(cutoffTimer!==null)applyCutoff();
   const button=$("save-session");button.disabled=true;button.textContent="Saving investigation…";
   try{
     const json=JSON.stringify(sessionSnapshot());
@@ -655,12 +706,11 @@ $("save-session").addEventListener("click",async()=>{
     }else saveFile("trace-investigation.json",json,"application/json;charset=utf-8");
     toast("Saved all model results, timeline edits, and original records.");
   }catch(error){showError("page-error",`Could not save investigation: ${error.message}`);}
-  finally{button.disabled=false;button.textContent="Save investigation data";}
+  finally{button.disabled=false;button.innerHTML=icon("upload")+"<span>Save investigation data</span>";}
 });
-$("load-session").addEventListener("click",()=>{if(!state.busy&&!state.modelBusy&&!state.reading)$("session-file").click();});
 $("session-file").addEventListener("change",async()=>{
   const file=$("session-file").files[0];$("session-file").value="";if(!file||state.busy||state.modelBusy||state.reading)return;
-  state.reading=true;syncControls();$("load-session").disabled=true;showError("page-error");
+  state.reading=true;syncControls();showError("page-error");
   try{
     let text;
     if(/\.gz$/i.test(file.name)){
@@ -669,12 +719,13 @@ $("session-file").addEventListener("change",async()=>{
     }else text=await file.text();
     await restoreSession(JSON.parse(text));
   }catch(error){showError("page-error",`Could not open saved investigation: ${error.message}`);}
-  finally{state.reading=false;$("load-session").disabled=false;syncControls();}
+  finally{state.reading=false;syncControls();}
 });
 $("export-investigation").addEventListener("click",exportReport);
 $("export-investigation-csv").addEventListener("click",exportRawCSV);
 window.addEventListener("resize",()=>{clearTimeout(state.resizeTimer);state.resizeTimer=setTimeout(()=>{if(state.run&&!$("results-panel").hidden){if(state.caseId)renderModelEvidence();else renderOverview();}},150);});
+renderRoute();
 (async()=>{
-  try{const status=await api("/api/status");state.models=status.models.filter((model)=>model.id!=="rules"&&model.available);for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Models online":"No models available";syncControls();}
-  catch(error){$("connection").textContent="Server unavailable";showError("page-error",error.message);}
+  try{const status=await api("/api/status");state.models=status.models.filter((model)=>model.id!=="rules"&&model.available);for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});state.ready=true;renderModels();syncControls();}
+  catch(error){showError("analyze-error",error.message);}
 })();
