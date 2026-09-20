@@ -41,7 +41,7 @@
           <pre id="file-preview" class="file-preview" hidden></pre>
         </div>
         <div id="paste-input-panel" hidden><label class="field-label" for="log-input">Log lines</label><textarea id="log-input" spellcheck="false" placeholder='10.0.5.12 - sarah_j [15/Mar/2026:11:07:57 -0400] "POST /api/admin/role_update HTTP/1.1" 200 512'></textarea><p id="paste-count" class="field-hint">One request per line. Blank lines are ignored.</p></div>
-        <div class="analysis-controls"><div class="model-field"><label class="field-label" for="model-select">Analyze with</label><select id="model-select"><option value="rules">Preview rules</option></select></div><button class="button primary" id="analyze-submit" type="submit" disabled><span data-icon="search"></span><span>Analyze logs</span></button></div>
+        <div class="analysis-controls"><div class="model-field"><label class="field-label" for="model-select">Analyze with</label><select id="model-select" disabled><option value="" disabled selected>Loading models…</option></select></div><button class="button primary" id="analyze-submit" type="submit" disabled><span data-icon="search"></span><span>Analyze logs</span></button></div>
         <p class="model-help" id="model-help">Checking available models…</p>
         <div id="analyze-error" class="error-message" role="alert" hidden></div>
         <div id="processing-progress" class="processing-progress" hidden><div class="progress-heading"><strong id="progress-stage">Preparing analysis</strong><span id="progress-count"></span></div><progress id="progress-bar" max="100" aria-label="Analysis progress"></progress><p id="progress-message" role="status" aria-live="polite"></p></div>
@@ -94,7 +94,7 @@
           <aside id="evidence-workspace" class="panel evidence-workspace" aria-labelledby="evidence-heading">
             <div class="evidence-workspace-heading"><h3 id="evidence-heading">Select an event or episode</h3><p class="field-hint">Evidence for your current timeline selection</p></div>
             <section class="model-workspace" aria-labelledby="model-evidence-title">
-              <div class="model-workspace-heading"><h3 id="model-evidence-title">Model evidence</h3><label class="sr-only" for="evidence-model">Detector for this selection</label><select id="evidence-model"><option value="rules">Request rules</option></select></div>
+              <div class="model-workspace-heading"><h3 id="model-evidence-title">Model evidence</h3><label class="sr-only" for="evidence-model">Detector for this selection</label><select id="evidence-model"></select></div>
               <p id="model-run-status" class="model-run-status" role="status" aria-live="polite"></p>
               <div id="model-evidence-content"><p class="empty-state">Select an episode or event to inspect the detector’s evidence.</p></div>
               <details class="model-comparison-details"><summary>Compare detector perspectives</summary><div id="model-comparison"></div></details>
