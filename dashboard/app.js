@@ -252,11 +252,11 @@ function renderOverview(){
   $("overview-panel").hidden=false;$("investigation-workspace").hidden=true;
   const query=state.query.trim().toLowerCase();
   if($("overview-activity-title"))$("overview-activity-title").textContent=$("show-other-traffic").checked?"Requests around candidate investigations":"When candidate requests occurred";
-  const matches=state.investigations.filter((item)=>(!state.account||item.account===state.account)&&(!query||[item.account,...item.sources,...item.rows.map((row)=>`${row.method} ${row.path} ${row.status}`)].join(" ").toLowerCase().includes(query)));
+  const matches=state.investigations.filter((item)=>(!state.account||(item.grouping?.manual?caseRows(item).some((row)=>row.user===state.account):item.account===state.account))&&(!query||[item.title||"",item.account,...item.sources,...item.rows.map((row)=>`${row.method} ${row.path} ${row.status}`)].join(" ").toLowerCase().includes(query)));
   const pages=Math.max(1,Math.ceil(matches.length/8));state.overviewPage=Math.min(state.overviewPage,pages);
   const shown=matches.slice((state.overviewPage-1)*8,state.overviewPage*8);
-  $("overview-counts").textContent=`${number(matches.length)} candidate investigations · ${number(matches.reduce((sum,item)=>sum+item.candidateIds.length,0))} detector candidates · grouped by account and time`;
-  $("investigation-list").innerHTML=shown.map((item)=>`<article class="investigation-card"><div class="investigation-card-heading"><div><h3>${escapeHTML(accountName(item.account))}</h3><p class="investigation-card-meta">${shortTime(item.start)} – ${shortTime(item.end)}</p></div><button class="button primary" data-open-case="${escapeHTML(item.id)}">Open investigation</button></div><p class="investigation-card-meta">${number(item.candidateIds.length)} candidate requests · ${number(item.sources.length)} source IP${item.sources.length===1?"":"s"} · ${escapeHTML(item.sources.slice(0,3).join(", "))}${item.sources.length>3?" …":""}</p><p class="investigation-progression">${caseProgression(item).map(escapeHTML).join(' <span aria-hidden="true">→</span> ')}</p><p class="investigation-models">${item.savedOnly?"Saved analyst reconstruction at its original cutoff. ":""}Detected by ${escapeHTML(state.run.model_name)}. ${number(item.rows.length-item.candidateIds.length)} nearby requests available as context.</p></article>`).join("");
+  $("overview-counts").textContent=`${number(matches.length)} candidate investigations · ${number(matches.reduce((sum,item)=>sum+item.candidateIds.length,0))} detector candidates · ${matches.some((item)=>item.grouping?.manual)?"includes analyst reconstructions":"grouped by account and time"}`;
+  $("investigation-list").innerHTML=shown.map((item)=>`<article class="investigation-card"><div class="investigation-card-heading"><div><h3>${escapeHTML(item.title||accountName(item.account))}</h3><p class="investigation-card-meta">${shortTime(item.start)} – ${shortTime(item.end)}</p></div><button class="button primary" data-open-case="${escapeHTML(item.id)}">Open investigation</button></div><p class="investigation-card-meta">${number(item.candidateIds.length)} candidate requests · ${number(item.sources.length)} source IP${item.sources.length===1?"":"s"} · ${escapeHTML(item.sources.slice(0,3).join(", "))}${item.sources.length>3?" …":""}</p><p class="investigation-progression">${caseProgression(item).map(escapeHTML).join(' <span aria-hidden="true">→</span> ')}</p><p class="investigation-models">${item.savedOnly?"Saved analyst reconstruction at its original cutoff. ":""}${item.grouping?.manual?"Analyst reconstruction; detector scores are supporting evidence.":`Detected by ${escapeHTML(state.run.model_name)}.`} ${number(item.rows.length-item.candidateIds.length)} ${item.grouping?.manual?"additional evidence records":"nearby requests available as context"}.</p></article>`).join("");
   $("overview-empty").hidden=matches.length>0;$("overview-empty").textContent=state.investigations.length?"No investigations match this account or search. Clear those filters to see the other investigations.":"No requests meet this cutoff. Lower it to broaden the investigation.";
   $("overview-page").textContent=`${state.overviewPage} / ${pages}`;$("overview-previous").disabled=state.overviewPage<=1;$("overview-next").disabled=state.overviewPage>=pages;
   if($("overview-timeline-chart")){
@@ -278,13 +278,16 @@ function renderWorkspace(){
   const item=caseById();if(!item)return;
   $("overview-panel").hidden=true;$("investigation-workspace").hidden=false;
   const retained=caseRows(item),ids=candidateIds(item),candidates=retained.filter((row)=>ids.has(row.id)),candidateSources=new Set(candidates.map((row)=>row.ip));
-  $("investigation-title").textContent=`${item.savedOnly?"Saved investigation":"Investigation"}: ${accountName(item.account)}`;
+  $("investigation-title").textContent=item.title||`${item.savedOnly?"Saved investigation":"Investigation"}: ${accountName(item.account)}`;
   $("investigation-title").setAttribute("tabindex","-1");
   const observedSources=[...new Set(retained.map((row)=>row.ip))],observedAccounts=[...new Set(retained.map((row)=>accountName(row.user)))];
-  $("investigation-meta").textContent=`Candidate window: ${shortTime(item.start)} – ${shortTime(item.end)} · Evidence sources: ${observedSources.join(", ")}`;
+  $("investigation-meta").textContent=`${item.grouping?.manual?"Reconstruction window":"Candidate window"}: ${shortTime(item.start)} – ${shortTime(item.end)} · Evidence sources: ${observedSources.join(", ")}`;
   const first=candidates[0],last=candidates[candidates.length-1];
-  $("investigation-summary").innerHTML=`<span class="evidence-kind">Observed</span><p>${escapeHTML(accountName(item.account))} has ${number(candidates.length)} retained candidate requests associated with ${number(candidateSources.size)} source IP${candidateSources.size===1?"":"s"}. ${first?`The candidate sequence starts with <button class="text-button" data-select-event="${first.id}">${escapeHTML(actionName(first))}</button> (HTTP ${first.status})${last!==first?` and ends with <button class="text-button" data-select-event="${last.id}">${escapeHTML(actionName(last))}</button> (HTTP ${last.status})`:""}.`:"All candidate requests have been removed from this reconstruction."}</p><p class="field-hint">Evidence participants: ${escapeHTML(observedAccounts.join(", "))}. ${item.addedIds?.size?`${item.addedIds.size} history records explicitly added by the analyst. `:""}${escapeHTML(state.run.model_name)} supplied the candidate set. Grouping proposes a relationship; it does not confirm an incident.</p>`;
-  $("grouping-note").textContent="Authenticated requests are linked by account, including source changes. Anonymous requests are linked by IP. A gap over 30 minutes between candidates starts another investigation. Context includes the same actor’s requests up to 5 minutes before and after. Episode boundaries follow request method, target, and time proximity—not inferred attack stages.";
+  const candidateAccounts=[...new Set(candidates.map((row)=>accountName(row.user)))];
+  const candidateSubject=item.grouping?.manual?`${candidateAccounts.join(", ")||"This reconstruction"} ${candidateAccounts.length>1?"have":"has"}`:`${accountName(item.account)} has`;
+  $("investigation-summary").innerHTML=`<span class="evidence-kind">Observed</span><p>${escapeHTML(candidateSubject)} ${number(candidates.length)} retained candidate requests associated with ${number(candidateSources.size)} source IP${candidateSources.size===1?"":"s"}. ${first?`The candidate sequence starts with <button class="text-button" data-select-event="${first.id}">${escapeHTML(actionName(first))}</button> (HTTP ${first.status})${last!==first?` and ends with <button class="text-button" data-select-event="${last.id}">${escapeHTML(actionName(last))}</button> (HTTP ${last.status})`:""}.`:"All candidate requests have been removed from this reconstruction."}</p><p class="field-hint">Evidence participants: ${escapeHTML(observedAccounts.join(", "))}. ${item.addedIds?.size?`${item.addedIds.size} history records explicitly added by the analyst. `:""}${escapeHTML(state.run.model_name)} supplied the candidate set. ${item.grouping?.manual?"The analyst linked these records; the proposed relationship is not an independently confirmed incident.":"Grouping proposes a relationship; it does not confirm an incident."}</p>`;
+  if(item.summary?.narrative)$("investigation-summary").insertAdjacentHTML("beforeend",`<p><span class="evidence-kind">Analyst reconstruction</span> ${escapeHTML(item.summary.narrative)}</p>`);
+  $("grouping-note").textContent=item.grouping?.manual?String(item.grouping.note||"Manually reconstructed by the analyst from linked evidence."):"Authenticated requests are linked by account, including source changes. Anonymous requests are linked by IP. A gap over 30 minutes between candidates starts another investigation. Context includes the same actor’s requests up to 5 minutes before and after. Episode boundaries follow request method, target, and time proximity—not inferred attack stages.";
   $("add-investigation-note").value=editsFor(item).note;$("include-context").checked=state.includeContext;
   $("restore-events").disabled=!item.rows.some((row)=>disposition(row)==="excluded");
   renderEpisodes();renderBaseline();renderEvidence();
@@ -397,6 +400,75 @@ function saveFile(name,body,type){
   const url=URL.createObjectURL(new Blob([body],{type})),link=document.createElement("a");
   link.href=url;link.download=name;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
+// Portable v1: canonical records once, detector overlays, and analyst reconstruction by record ID.
+function sessionSnapshot(){
+  const record=(row)=>{const {time,signals,...saved}=row;return saved;};
+  const episode=(item)=>{const {rows,...saved}=item;return {...saved,rowIds:rows.map((row)=>row.id)};};
+  const runs=[...state.runs.values()].map((run)=>{
+    const {rows,rowsById,...metadata}=run;
+    return {...metadata,rows:rows.map((row)=>{
+      const original=state.rowsById.get(row.id),overlay={id:row.id};
+      for(const [key,value] of Object.entries(record(row)))if(key!=="id"&&(!original||JSON.stringify(value)!==JSON.stringify(original[key])))overlay[key]=value;
+      return overlay;
+    })};
+  });
+  return {schema:"log-order-investigation",version:1,saved_at:new Date().toISOString(),source:state.source,synthetic:state.synthetic,
+    base_model:state.run.model,active_model:state.activeModel,threshold:state.threshold,rows:state.run.rows.map(record),runs,
+    investigations:state.investigations.map((item)=>{const {rows,episodes,addedIds,...saved}=item;return {...saved,rowIds:rows.map((row)=>row.id),episodes:episodes.map(episode),addedIds:[...(addedIds||[])]};}),
+    edits:[...state.edits].map(([id,value])=>[id,{...value,episodes:value.episodes.map(episode)}]),
+    dispositions:[...state.dispositions],eventNotes:[...state.eventNotes],caseId:state.caseId,selection:state.selection,
+    query:state.query,account:state.account,includeContext:state.includeContext};
+}
+async function restoreSession(saved){
+  if(saved?.schema!=="log-order-investigation"||saved.version!==1||!Array.isArray(saved.rows)||!saved.rows.length||!Array.isArray(saved.runs)||!saved.runs.length)throw new Error("Choose a Log & Order investigation save (version 1).");
+  const ids=new Set();
+  for(const row of saved.rows){
+    if(!Number.isSafeInteger(row.id)||ids.has(row.id)||!Number.isFinite(Date.parse(row.timestamp))||typeof row.raw!=="string"||!Number.isFinite(row.status))throw new Error("The saved investigation contains invalid or duplicate records.");
+    ids.add(row.id);
+  }
+  const canonical=new Map(saved.rows.map((row)=>[row.id,row])),runs=new Map();
+  for(const entry of saved.runs){
+    if(typeof entry.model!=="string"||runs.has(entry.model)||!Array.isArray(entry.rows)||entry.rows.length!==saved.rows.length)throw new Error("A saved model has missing or duplicate records.");
+    const seen=new Set();
+    const rows=entry.rows.map((overlay)=>{
+      if(!canonical.has(overlay.id)||seen.has(overlay.id))throw new Error("A model result does not match the saved records.");seen.add(overlay.id);
+      const row={...canonical.get(overlay.id),...overlay};
+      for(const field of ["raw","timestamp","user","ip","method","path","status","bytes"])if(row[field]!==canonical.get(row.id)[field])throw new Error("A model result changes the original evidence.");
+      if(!Number.isFinite(row.score)||row.score<0||row.score>1)throw new Error("A model result has an invalid score.");
+      return row;
+    });
+    runs.set(entry.model,await prepareRun({...entry,rows}));
+  }
+  const run=runs.get(saved.base_model);if(!run)throw new Error("The base detector is missing from this save.");
+  const safeId=(id)=>typeof id==="string"&&/^[a-zA-Z0-9_:.-]+$/.test(id);
+  const rowRefs=(rowIds)=>{if(!Array.isArray(rowIds)||rowIds.some((id)=>!run.rowsById.has(id)))throw new Error("The timeline refers to missing records.");return rowIds.map((id)=>run.rowsById.get(id));};
+  const episode=(item)=>{if(!safeId(item.id))throw new Error("Invalid episode identifier.");const rows=rowRefs(item.rowIds);if(!rows.length)throw new Error("An episode has no records.");return {...item,rows,start:rows[0].time,end:rows[rows.length-1].time};};
+  const threshold=Number.isFinite(saved.threshold)&&saved.threshold>=0&&saved.threshold<=1?saved.threshold:defaultCutoff(run);
+  const investigations=saved.investigations? saved.investigations.map((item)=>{
+    if(!safeId(item.id)||!Number.isFinite(item.start)||!Number.isFinite(item.end)||!Array.isArray(item.sources))throw new Error("Invalid investigation metadata.");
+    rowRefs(item.candidateIds);return {...item,rows:rowRefs(item.rowIds),episodes:item.episodes.map(episode),addedIds:new Set(item.addedIds||[])};
+  }):Investigation.buildInvestigations(run.rows,{isCandidate:(row)=>Review.isCandidate(row,threshold)}).map((item)=>({...item,reviewCutoff:threshold}));
+  const edits=new Map((saved.edits||[]).map(([id,value])=>[id,{...value,episodes:value.episodes.map(episode)}]));
+  const dispositions=new Map(saved.dispositions||[]),eventNotes=new Map(saved.eventNotes||[]);
+  if([...dispositions.values()].some((value)=>!["important","benign","promoted","excluded"].includes(value)))throw new Error("Invalid analyst disposition.");
+  const selectedCase=investigations.find((item)=>item.id===saved.caseId);
+  const selection=saved.selection;
+  const selectedEpisodes=selectedCase?(edits.get(selectedCase.id)?.episodes||selectedCase.episodes):[];
+  const validSelection=selectedCase&&selection&&(selection.type==="event"?run.rowsById.has(selection.id):selection.type==="episode"&&selectedEpisodes.some((item)=>item.id===selection.id));
+  state.revision++;state.run=run;state.runs=runs;state.rowsById=run.rowsById;state.logs=run.rows.map((row)=>row.raw).join("\n");
+  state.source=String(saved.source||"Saved investigation");state.synthetic=Boolean(saved.synthetic);state.threshold=threshold;
+  state.activeModel=runs.has(saved.active_model)?saved.active_model:saved.base_model;state.investigations=investigations;state.edits=edits;state.dispositions=dispositions;state.eventNotes=eventNotes;
+  state.caseId=investigations.some((item)=>item.id===saved.caseId)?saved.caseId:null;state.selection=validSelection?selection:selectedEpisodes.length?{type:"episode",id:selectedEpisodes[0].id}:null;
+  state.query=String(saved.query||"");state.account=String(saved.account||"");state.includeContext=saved.includeContext!==false;state.overviewPage=1;state.episodeLimit=12;state.eventLimits=new Map();
+  for(const [id,cached] of runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:cached.model_name||id,available:false});
+  $("investigation-search").value=state.query;$("investigation-cutoff").value=String(Number((threshold*100).toFixed(5)));
+  $("investigation-cutoff-label").textContent=run.mode==="heuristic"?"Rule score cutoff":"Percentile cutoff";
+  $("investigation-account").innerHTML='<option value="">All accounts</option>'+Review.accountCounts(run.rows).map(([account])=>`<option value="${escapeHTML(account)}">${escapeHTML(accountName(account))}</option>`).join("");$("investigation-account").value=state.account;
+  $("results-title").textContent="Saved investigations";$("run-description").textContent=`${state.source} · ${number(run.rows.length)} requests · ${runs.size} saved detector results`;
+  $("run-notice").textContent="Loaded saved results and analyst notes. No detectors were run.";$("run-notice").hidden=false;
+  showResults();toast("Investigation restored, including model results and notes.");
+}
+window.LogSession={snapshot:sessionSnapshot,restore:restoreSession};
 function exportReport(){
   const item=caseById(),edits=editsFor(item),rows=caseRows(item),baseline=state.baseline;
   const literal=(value)=>String(value).replace(/[\\`*_{}\[\]<>#|]/g,"\\$&");
@@ -536,10 +608,37 @@ $("evidence-workspace").addEventListener("change",(event)=>{
 });
 $("evidence-workspace").addEventListener("input",(event)=>{if(event.target.id==="event-note"&&state.selection?.type==="event")state.eventNotes.set(state.selection.id,event.target.value);});
 $("evidence-model").addEventListener("change",()=>{state.activeModel=$("evidence-model").value;$("model-run-status").textContent="";renderModelEvidence();});
+$("save-session").addEventListener("click",async()=>{
+  if(!state.run||state.modelBusy||state.busy||$("save-session").disabled)return;
+  const button=$("save-session");button.disabled=true;button.textContent="Saving investigation…";
+  try{
+    const json=JSON.stringify(sessionSnapshot());
+    if(typeof CompressionStream!=="undefined"){
+      const compressed=await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"))).blob();
+      saveFile("log-order-investigation.json.gz",compressed,"application/gzip");
+    }else saveFile("log-order-investigation.json",json,"application/json;charset=utf-8");
+    toast("Saved all model results, timeline edits, and original records.");
+  }catch(error){showError("page-error",`Could not save investigation: ${error.message}`);}
+  finally{button.disabled=false;button.textContent="Save investigation data";}
+});
+$("load-session").addEventListener("click",()=>{if(!state.busy&&!state.modelBusy&&!state.reading)$("session-file").click();});
+$("session-file").addEventListener("change",async()=>{
+  const file=$("session-file").files[0];$("session-file").value="";if(!file||state.busy||state.modelBusy||state.reading)return;
+  state.reading=true;syncControls();$("load-session").disabled=true;showError("page-error");
+  try{
+    let text;
+    if(/\.gz$/i.test(file.name)){
+      if(typeof DecompressionStream==="undefined")throw new Error("This browser cannot open gzip saves. Unzip the file and open its JSON, or use a current browser.");
+      text=await new Response(file.stream().pipeThrough(new DecompressionStream("gzip"))).text();
+    }else text=await file.text();
+    await restoreSession(JSON.parse(text));
+  }catch(error){showError("page-error",`Could not open saved investigation: ${error.message}`);}
+  finally{state.reading=false;$("load-session").disabled=false;syncControls();}
+});
 $("export-investigation").addEventListener("click",exportReport);
 $("export-investigation-csv").addEventListener("click",exportRawCSV);
 window.addEventListener("resize",()=>{clearTimeout(state.resizeTimer);state.resizeTimer=setTimeout(()=>{if(state.run&&!$("results-panel").hidden){if(state.caseId)renderModelEvidence();else renderOverview();}},150);});
 (async()=>{
-  try{const status=await api("/api/status");state.models=status.models;state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Local server · trained models available":"Local server · rules available";syncControls();}
+  try{const status=await api("/api/status");state.models=status.models;for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Local server · trained models available":"Local server · rules available";syncControls();}
   catch(error){$("connection").textContent="Server unavailable";showError("page-error",error.message);}
 })();

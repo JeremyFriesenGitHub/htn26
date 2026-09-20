@@ -46,12 +46,12 @@ class KMeansDetector(_Scaled):
 class GMMDetector(_Scaled):
     """Negative log-likelihood under a Gaussian mixture (soft-clustering density)."""
 
-    def __init__(self, k=8, seed=0):
-        self.k, self.seed = k, seed
+    def __init__(self, k=8, seed=0, covariance_type="diag"):
+        self.k, self.seed, self.covariance_type = k, seed, covariance_type
 
     def fit(self, X):
         Xs = self._fit_scaler(X)
-        self.gmm = GaussianMixture(n_components=self.k, covariance_type="diag", random_state=self.seed, reg_covar=1e-4)
+        self.gmm = GaussianMixture(n_components=self.k, covariance_type=self.covariance_type, random_state=self.seed, reg_covar=1e-4)
         self.gmm.fit(Xs)
         return self
 
@@ -113,6 +113,8 @@ class PyODDetector(_Scaled):
         self.factory, self.needs_scale = factory, needs_scale
 
     def fit(self, X):
+        if self.factory is None:
+            raise ValueError("Create a new PyODDetector to refit a saved detector")
         Xs = self._fit_scaler(X) if self.needs_scale else np.asarray(X)
         self.m = self.factory(Xs.shape[1])
         self.m.fit(Xs)
@@ -121,6 +123,43 @@ class PyODDetector(_Scaled):
     def score(self, X):
         Xs = self._apply(X) if self.needs_scale else np.asarray(X)
         return self.m.decision_function(Xs)
+
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Factory closures are needed only for fitting, and cannot be pickled.
+        if "m" in state:
+            state["factory"] = None
+        return state
+
+
+class RankAverageDetector:
+    """Average percentile against each member's frozen training-score baseline."""
+
+    def __init__(self, members):
+        self.members = members
+
+    def fit(self, X):
+        self.baselines = {}
+        for name, detector in self.members.items():
+            detector.fit(X)
+            scores = np.asarray(detector.score(X), dtype=float)
+            if not len(scores) or not np.isfinite(scores).all():
+                raise ValueError(f"{name} returned invalid training scores")
+            self.baselines[name] = np.sort(scores)
+        return self
+
+    def score(self, X):
+        ranks = []
+        for name, detector in self.members.items():
+            baseline = self.baselines[name]
+            scores = np.asarray(detector.score(X), dtype=float)
+            if not np.isfinite(scores).all():
+                raise ValueError(f"{name} returned invalid scores")
+            lower = np.searchsorted(baseline, scores, side="left")
+            upper = np.searchsorted(baseline, scores, side="right")
+            ranks.append((lower + upper) / (2.0 * len(baseline)))
+        return np.mean(ranks, axis=0)
 
 
 class RuleNoveltyDetector:
@@ -153,23 +192,31 @@ class RuleNoveltyDetector:
         return s
 
 
-def build_pyod():
-    from pyod.models.hbos import HBOS
-    from pyod.models.ecod import ECOD
-    from pyod.models.copod import COPOD
-    from pyod.models.pca import PCA as PPCA
-    from pyod.models.auto_encoder import AutoEncoder
-    from pyod.models.deep_svdd import DeepSVDD
+def make_pyod(name):
+    """Import only the dependency required by the selected detector."""
+    if name == "HBOS":
+        from pyod.models.hbos import HBOS
+        return PyODDetector(lambda d: HBOS(n_bins=20))
+    if name == "ECOD":
+        from pyod.models.ecod import ECOD
+        return PyODDetector(lambda d: ECOD())
+    if name == "COPOD":
+        from pyod.models.copod import COPOD
+        return PyODDetector(lambda d: COPOD())
+    if name == "PCA":
+        from pyod.models.pca import PCA
+        return PyODDetector(lambda d: PCA())
+    if name == "AutoEncoder":
+        from pyod.models.auto_encoder import AutoEncoder
+        return PyODDetector(lambda d: AutoEncoder(
+            epoch_num=30, batch_size=512, hidden_neuron_list=[32, 16, 32], verbose=0))
+    if name == "DeepSVDD":
+        from pyod.models.deep_svdd import DeepSVDD
+        return PyODDetector(lambda d: DeepSVDD(
+            n_features=d, epochs=30, batch_size=512, verbose=0))
+    raise ValueError(f"Unknown PyOD detector: {name}")
 
-    return {
-        "HBOS": lambda: PyODDetector(lambda d: HBOS(n_bins=20)),
-        "ECOD": lambda: PyODDetector(lambda d: ECOD()),
-        "COPOD": lambda: PyODDetector(lambda d: COPOD()),
-        "PCA": lambda: PyODDetector(lambda d: PPCA()),
-        "AutoEncoder": lambda: PyODDetector(
-            lambda d: AutoEncoder(epoch_num=30, batch_size=512, hidden_neuron_list=[32, 16, 32], verbose=0)
-        ),
-        "DeepSVDD": lambda: PyODDetector(
-            lambda d: DeepSVDD(n_features=d, epochs=30, batch_size=512, verbose=0)
-        ),
-    }
+
+def build_pyod():
+    return {name: (lambda name=name: make_pyod(name))
+            for name in ("HBOS", "ECOD", "COPOD", "PCA", "AutoEncoder", "DeepSVDD")}

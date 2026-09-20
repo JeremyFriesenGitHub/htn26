@@ -26,15 +26,17 @@ import time
 from urllib.parse import unquote, urlsplit
 
 
+from .model_registry import TRAINED_MODELS
+
+
 ROOT = Path(__file__).resolve().parent.parent
 STORE = ROOT / "results" / "model_store"
 STATIC = ROOT / "dashboard"
 MAX_LINE_BYTES = 16384
-MODEL_NAMES = {"rules": "Heuristic preview", "gmm": "Gaussian mixture", "ae": "Deep autoencoder",
-               "hybrid": "GMM + LLM triage"}
+MODEL_NAMES = {"rules": "Heuristic preview", "hybrid": "GMM + LLM triage",
+               **{key: spec["name"] for key, spec in TRAINED_MODELS.items()}}
 HYBRID_TOPK = 60  # only the detector's shortlist is sent for review
-MODEL_FILES = {"gmm": ("encoder.pkl", "gmm.pkl"),
-               "ae": ("encoder.pkl", "ae_meta.pkl", "ae_models.pt")}
+MODEL_FILES = {key: spec["artifacts"] for key, spec in TRAINED_MODELS.items()}
 SCORING_LOCK = threading.Lock()
 HYBRID_LOCK = threading.Lock()
 MONTHS = {name: i for i, name in enumerate(
@@ -202,13 +204,11 @@ def model_status():
     for model, artifacts in MODEL_FILES.items():
         missing = [name for name in artifacts if not (STORE / name).is_file()]
         available = not missing
-        detail = "Uses the saved model; scores are calibrated against the training baseline."
+        detail = TRAINED_MODELS[model]["meaning"]
         if missing:
-            detail = "Missing model artifacts: %s. Run python -m bench.train in your ML environment." % ", ".join(missing)
+            detail = "Missing model artifacts: %s. Run python -m bench.train --models %s in your ML environment." % (", ".join(missing), model)
         else:
-            dependencies = ["numpy", "pandas", "sklearn", "scipy"]
-            if model == "ae":
-                dependencies.append("torch")
+            dependencies = TRAINED_MODELS[model]["dependencies"]
             for dependency in dependencies:
                 try:
                     importlib.import_module(dependency)
@@ -304,7 +304,7 @@ _CALIBRATION = {}
 def _calibration_identity(model):
     """Invalidate baseline scores if the encoder or detector is replaced."""
     return [[name, (STORE / name).stat().st_size, (STORE / name).stat().st_mtime_ns]
-            for name in MODEL_FILES[model] if (STORE / name).is_file()]
+            for name in (*MODEL_FILES[model], "encoder.pkl") if (STORE / name).is_file()]
 
 
 def _validated_grid(loaded):
@@ -628,7 +628,7 @@ def predict_payload(payload, progress=None):
         raise APIError("Send a JSON object with logs and model fields.")
     model = payload.get("model", "rules")
     if not isinstance(model, str) or model not in MODEL_NAMES:
-        raise APIError("Choose rules, gmm, ae, or hybrid as the model.")
+        raise APIError("Choose a supported model: " + ", ".join(MODEL_NAMES) + ".")
     records = parse_logs(payload.get("logs"), progress=progress)
     warning = None
     triage = None
@@ -681,6 +681,10 @@ def predict_payload(payload, progress=None):
               "detector_score_kind": kind, "review_threshold": threshold,
               "review_threshold_note": "Default display cutoff; not a validated alarm boundary or target alert count.",
               "notice": notice, "elapsed_ms": round((time.perf_counter() - start) * 1000, 2), "rows": rows}
+    evidence_model = "gmm" if model == "hybrid" else model
+    if evidence_model in TRAINED_MODELS:
+        spec = TRAINED_MODELS[evidence_model]
+        result["model_evidence_metadata"] = {"score_label": spec["score_label"], "meaning": spec["meaning"]}
     if triage:
         result.update(triage=triage, external=True)
     if warning:

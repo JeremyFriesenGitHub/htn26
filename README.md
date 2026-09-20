@@ -101,6 +101,10 @@ are needed. Use `--port 8766` to choose another port.
   requires an explicit analysis action on the same upload; unavailable models
   are not simulated. Current results do not expose embeddings or feature-level
   model attribution, so the UI does not invent them.
+- Use **Save investigation data** to download original records, cached model
+  results, timeline edits and notes as a portable `.json.gz` file. **Open
+  investigation** restores that save without rerunning detectors; plain JSON
+  saves are also supported.
 - Rename, merge, or split episodes; annotate events; mark them important or
   benign; remove/restore events or promote history into the reconstruction.
   Edits last for this browser session and are included in exported reports.

@@ -17,6 +17,7 @@
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="app-header"><div class="header-inner"><h1><span data-icon="logs"></span>Log review</h1><span id="connection" class="connection">Connecting to local server…</span></div></header>
   <main id="main">
+    <div class="export-actions"><button id="load-session" class="button secondary">Open saved investigation</button><input id="session-file" type="file" accept=".json,.json.gz,.gz,application/json,application/gzip" hidden></div>
     <div id="page-error" class="error-message" role="alert" hidden></div>
     <section id="input-panel" class="panel input-panel" aria-labelledby="input-title">
       <div class="panel-heading"><div><h2 id="input-title">Analyze access logs</h2><p>Upload an Apache log file or paste requests to find unusual activity.</p></div><button id="load-sample" class="button secondary">Try sample logs</button></div>
@@ -39,7 +40,7 @@
     <section id="results-panel" aria-labelledby="results-title" hidden>
       <div class="results-heading">
         <div><h2 id="results-title">Investigations found</h2><p id="run-description"></p></div>
-        <button class="button secondary" id="new-analysis"><span data-icon="upload"></span>New analysis</button>
+        <div class="export-actions"><button class="button secondary" id="save-session">Save investigation data</button><button class="button secondary" id="new-analysis"><span data-icon="upload"></span>New analysis</button></div>
       </div>
       <div id="run-notice" class="run-notice" hidden></div>
 
