@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 168 40" width="168" height="40" role="img" aria-label="trace.">
+  <rect width="40" height="40" rx="11" fill="#242e2b"/>
+  <path d="M10 12h20M20 12v16h10" fill="none" stroke="#b5eccb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="10" cy="12" r="3" fill="#b5eccb"/>
+  <circle cx="30" cy="28" r="3" fill="#b5eccb"/>
+  <text x="51" y="30" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+        font-size="31" font-weight="750" letter-spacing="-1.5" fill="#242729">trace<tspan fill="#438862">.</tspan></text>
+</svg>
