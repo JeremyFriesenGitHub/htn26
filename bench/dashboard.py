@@ -27,7 +27,9 @@ from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
-STORE = Path(os.environ.get("MODEL_STORE", ROOT / "results" / "model_store"))
+from .model_store import model_store
+
+STORE = model_store()
 STATIC = ROOT / "dashboard"
 MAX_LINE_BYTES = 16384
 MODEL_NAMES = {"rules": "Heuristic preview", "gmm": "Gaussian mixture", "ae": "Deep autoencoder",
@@ -293,6 +295,16 @@ RED_THRESHOLD = 0.99999
 TIER_THRESHOLDS = {"red": RED_THRESHOLD}
 
 
+def _stale(cache, artifacts):
+    """True when any model artifact is newer than the derived cache file."""
+    try:
+        written = cache.stat().st_mtime
+        return any((STORE / name).is_file() and (STORE / name).stat().st_mtime > written
+                   for name in artifacts)
+    except OSError:
+        return True
+
+
 def calibration(model):
     """Quantiles of the model's score over training traffic, cached on disk.
 
@@ -307,6 +319,11 @@ def calibration(model):
             return _CALIBRATION[model]
         cache = STORE / ("calibration2_%s.json" % model)
         grid = None
+        # A calibration describes one fitted model. If the artifacts were retrained
+        # since it was written, the stored tail is the OLD model's and the alert bar
+        # would silently sit in the wrong place - rebuild instead.
+        if cache.is_file() and _stale(cache, MODEL_FILES.get(model, ())):
+            cache.unlink(missing_ok=True)
         if cache.is_file():
             try:
                 loaded = json.loads(cache.read_text())
@@ -436,6 +453,8 @@ def user_profiles():
             return _PROFILES["p"]
         cache = STORE / "profiles.json"
         profiles = None
+        if cache.is_file() and _stale(cache, ("encoder.pkl",)):
+            cache.unlink(missing_ok=True)
         if cache.is_file():
             try:
                 loaded = json.loads(cache.read_text())
