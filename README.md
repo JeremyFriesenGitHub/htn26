@@ -154,26 +154,41 @@ are needed. Use `--port 8766` to choose another port.
 - Upload a `.log` / `.txt` file, drag and drop it, or paste Apache Common or
   Combined Log Format lines. There is no application-level file-size or total-line
   limit; available memory determines how large a batch can be processed.
-- Review flagged requests first, adjust the score cutoff, filter by source IP,
-  search, sort scores, and inspect explanations alongside nearby requests from
-  the same IP and user. The chart shows when flagged requests occurred.
-- Export the currently filtered results as CSV, including the model, score type,
-  cutoff, original line number, and whether the input was synthetic.
-- The **heuristic preview** works immediately using fixed request indicators and
-  earlier failed logins from the same IP/user. It is not a trained detector and
-  does not learn user permission profiles. Use **Try sample logs** to explore a
-  synthetic example; the dashboard does not load sample data automatically.
+- Start with **Investigations found**, grouped by authenticated account across IP
+  changes (anonymous traffic groups by IP) and gaps of no more than 30 minutes.
+  A red-only overview chart locates candidates; other traffic is optional.
+- Open an investigation for its chronological episodes and a linked evidence
+  workspace. Episode labels use literal request methods and paths, not inferred
+  attack phases. Nearby requests remain visible as context.
+- Inspect events, native model scores, and earlier-upload comparisons together.
+  Switch detector lenses without losing the selected event. A model not yet run
+  requires an explicit analysis action on the same upload; unavailable models
+  are not simulated. Current results do not expose embeddings or feature-level
+  model attribution, so the UI does not invent them.
+- Use **Save investigation data** to download original records, cached model
+  results, timeline edits and notes as a portable `.json.gz` file. **Open
+  investigation** restores that save without rerunning detectors; plain JSON
+  saves are also supported.
+- Rename, merge, or split episodes; annotate events; mark them important or
+  benign; remove/restore events or promote history into the reconstruction.
+  Edits last for this browser session and are included in exported reports.
+- Export an investigation report with Who / What / When / How, model evidence,
+  analyst interpretation, and original records. Raw CSV remains available.
+- **Preview rules** use fixed request indicators; they are not a trained detector.
+  **Try sample logs** loads a synthetic example only when requested.
 - **GMM** and **Deep autoencoder** become selectable when their dependencies and
   saved artifacts under `results/model_store/` are available. Train them using
   the commands below, then start the dashboard with that environment's Python:
   `.venv/bin/python -m bench.dashboard`.
 
-Trained scores are **percentiles within the uploaded batch**, not attack
-probabilities. The review threshold defaults to 98/100 for trained models and
-75/100 for the heuristic preview. Explanation tags describe request features;
-they are not model attribution. Uploads are processed in memory on the local
-server and are not written to disk or sent to an external LLM. The server binds
-to `127.0.0.1` by default and is intended for local use.
+Trained results preserve raw anomaly scores and use training-baseline percentiles
+when calibration is available, otherwise batch percentiles. Neither is attack
+confidence. Defaults are 99.9 for calibrated scores, 98 for batch percentiles, and
+75 for preview rules; the cutoff is adjustable. Explanation tags describe request
+features, not model attribution. Optional hybrid review sends shortlisted traffic
+to OpenAI; local model and rule runs do not. Uploads are processed in memory.
+The dashboard analyzes uploaded batches; it does not continuously ingest logs.
+The server binds to `127.0.0.1` by default and is intended for local use.
 
 Run the dashboard backend checks with `python3 -m unittest discover -s tests -v`.
 
