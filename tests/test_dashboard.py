@@ -164,7 +164,8 @@ class ModelTests(unittest.TestCase):
                 # Only the dependency-free preview works without artifacts. Keyed by id so
                 # adding a model does not break this on ordering.
                 self.assertEqual({model["id"]: model["available"] for model in status["models"]},
-                                 {"rules": True, "hybrid": False, "gmm": False, "ae": False})
+                                 {"rules": True, "hybrid": False,
+                                  **{model: False for model in dashboard.MODEL_FILES}})
                 importer.assert_not_called()
                 for model in ("gmm", "ae", "hybrid"):
                     with self.assertRaises(dashboard.APIError) as raised:
@@ -215,9 +216,9 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(model, "gmm")
             self.assertEqual(frame["src_line"], [2, 4])
             self.assertEqual(frame["ip"], ["10.0.9.05", "10.0.9.05"])
-            return SimpleNamespace(iterrows=lambda: iter([
-                (1, {"src_line": 4, "score": 1.0, "reasons": "rare-status,new-IP-for-user"}),
-                (0, {"src_line": 2, "score": .5, "reasons": "-"})]))
+            return SimpleNamespace(columns=["score_raw"], iterrows=lambda: iter([
+                (0, {"src_line": 2, "score": .5, "score_raw": 20., "reasons": "-"}),
+                (1, {"src_line": 4, "score": 1.0, "score_raw": 200., "reasons": "rare-status,new-IP-for-user"})]))
 
         pandas = SimpleNamespace(DataFrame=Frame, to_datetime=as_datetime)
         data = SimpleNamespace(template=lambda path: path)
@@ -225,7 +226,8 @@ class ModelTests(unittest.TestCase):
         import bench
         with mock.patch.dict(sys.modules, {"pandas": pandas, "bench.data": data, "bench.predict": predictor}), \
                 mock.patch.object(bench, "data", data, create=True), \
-                mock.patch.object(bench, "predict", predictor, create=True):
+                mock.patch.object(bench, "predict", predictor, create=True), \
+                mock.patch.object(dashboard, "calibration", return_value={"values": [0., 10.], "levels": [0., 1.]}):
             source = "\n" + log(ip="10.0.9.05") + "\n\n" + log(ip="10.0.9.05&#x20;", path="/admin")
             records = dashboard.parse_logs(source)
             rows = dashboard.score_trained(records, "gmm")
@@ -234,6 +236,116 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(rows[0]["ip"], "10.0.9.05")
         self.assertEqual(rows[1]["reasons"], [])
         self.assertEqual(rows[0]["reasons"], ["rare-status", "new-IP-for-user"])
+        self.assertEqual([row["raw_score"] for row in rows], [200., 20.])
+        self.assertEqual([row["baseline_percentile"] for row in rows], [1., 1.])
+        self.assertEqual([row["batch_percentile"] for row in rows], [1., .5])
+        self.assertTrue(all(row["above_baseline"] for row in rows))
+        self.assertTrue(all("tier" not in row for row in rows))
+
+
+class CalibrationTests(unittest.TestCase):
+    def test_quantiles_interpolate_instead_of_rounding_up(self):
+        grid = {"values": [0., 10., 20.], "levels": [0., .5, 1.]}
+        self.assertEqual(dashboard.calibrated_score(grid, -1), 0.)
+        self.assertEqual(dashboard.calibrated_score(grid, 5), .25)
+        self.assertEqual(dashboard.calibrated_score(grid, 10), .5)
+        self.assertAlmostEqual(dashboard.calibrated_score(grid, 19), .95)
+        self.assertEqual(dashboard.calibrated_score(grid, 21), 1.)
+
+    def test_quantile_ties_use_midpoint_and_constant_baseline_is_well_defined(self):
+        tied = {"values": [0., 10., 10., 20.], "levels": [0., .2, .8, 1.]}
+        self.assertEqual(dashboard.calibrated_score(tied, 10), .5)
+        constant = {"values": [5., 5., 5.], "levels": [0., .5, 1.]}
+        self.assertEqual(dashboard.calibrated_score(constant, 5), .5)
+        self.assertEqual(dashboard.calibrated_score(constant, 4), 0.)
+        self.assertEqual(dashboard.calibrated_score(constant, 6), 1.)
+
+    def test_empirical_percentiles_count_ties_and_keep_observed_max_below_one(self):
+        # Training scores [10, 10, 20, 20]: midpoint ranks at observed values.
+        grid = {"kind": "empirical", "values": [10., 20.], "levels": [.25, .75],
+                "upper": [.5, 1.], "sample_size": 4}
+        self.assertEqual(dashboard.calibrated_score(grid, 10), .25)
+        self.assertEqual(dashboard.calibrated_score(grid, 15), .5)
+        self.assertEqual(dashboard.calibrated_score(grid, 20), .75)
+        self.assertEqual(dashboard.calibrated_score(grid, 21), 1.)
+
+    def test_invalid_calibration_caches_are_rejected(self):
+        for grid in ({"values": [2, 1], "levels": [0, 1]},
+                     {"values": [1, 2], "levels": [.9, .1]},
+                     {"values": [1, float("nan")], "levels": [0, 1]},
+                     {"values": [1, 2], "levels": [0]},
+                     {"values": [1, 2], "levels": [0, 2]}):
+            with self.subTest(grid=grid):
+                self.assertIsNone(dashboard._validated_grid(grid))
+
+    def test_baseline_cache_invalidates_when_artifacts_change(self):
+        grid = {"kind": "empirical", "values": [1.], "levels": [.5], "upper": [1.], "sample_size": 1}
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(dashboard, "STORE", Path(folder)), \
+                mock.patch.object(dashboard, "_CALIBRATION", {}), \
+                mock.patch.object(dashboard, "_build_calibration", return_value=grid) as build:
+            artifact = Path(folder) / "gmm.pkl"
+            artifact.write_bytes(b"original")
+            dashboard.calibration("gmm")
+            dashboard.calibration("gmm")
+            self.assertEqual(build.call_count, 1)
+            artifact.touch()  # A fresh Git checkout must preserve valid calibration.
+            dashboard._CALIBRATION.clear()
+            dashboard.calibration("gmm")
+            self.assertEqual(build.call_count, 1)
+            artifact.write_bytes(b"new model with different score scale")
+            dashboard.calibration("gmm")
+            self.assertEqual(build.call_count, 2)
+
+
+class HybridTests(unittest.TestCase):
+    def test_missing_verdicts_and_unsubmitted_rows_remain_unreviewed_without_score_changes(self):
+        records = dashboard.parse_logs("\n".join(log(second=second) for second in range(4)))
+        rows = [record.public(.99 - index * .1, ["original-reason"])
+                for index, record in enumerate(records)]
+        for index, row in enumerate(rows):
+            row.update(raw_score=100. - index, baseline_percentile=row["score"], above_baseline=False)
+        original = [(row["score"], row["raw_score"], row["reasons"][:]) for row in rows]
+        parsed = {"verdicts": [{"id": 1, "is_incident": True, "reason": "Investigate this request"},
+                                {"id": 2, "is_incident": False, "reason": "Matches the profile"}]}
+        with mock.patch.object(dashboard, "score_trained", return_value=rows), \
+                mock.patch.object(dashboard, "user_profiles", return_value={}), \
+                mock.patch.object(dashboard, "_call_llm", return_value=parsed), \
+                mock.patch.object(dashboard, "HYBRID_TOPK", 3):
+            scored, summary = dashboard.score_hybrid(records)
+        self.assertEqual([row["triage"] for row in scored], ["flagged", "cleared", "unreviewed", "unreviewed"])
+        self.assertEqual([(row["score"], row["raw_score"], row["reasons"]) for row in scored], original)
+        self.assertEqual(summary, {"submitted": 3, "reviewed": 2, "flagged": 1, "cleared": 1,
+                                   "unreviewed": 2, "missing_verdicts": 1})
+
+    def test_duplicate_or_malformed_verdict_is_never_treated_as_cleared(self):
+        records = dashboard.parse_logs(log())
+        rows = [records[0].public(.99, [])]
+        for verdicts in ([{"id": 1, "is_incident": "false", "reason": "invalid boolean"}],
+                         [{"id": 1, "is_incident": True, "reason": "one"},
+                          {"id": 1, "is_incident": False, "reason": "conflicting duplicate"}],
+                         [{"id": 999, "is_incident": False, "reason": "wrong id"}], []):
+            with self.subTest(verdicts=verdicts), \
+                    mock.patch.object(dashboard, "score_trained", return_value=rows), \
+                    mock.patch.object(dashboard, "user_profiles", return_value={}), \
+                    mock.patch.object(dashboard, "_call_llm", return_value={"verdicts": verdicts}):
+                with self.assertRaises(dashboard.APIError) as raised:
+                    dashboard.score_hybrid(records)
+                self.assertEqual(raised.exception.status, 503)
+                self.assertEqual(rows[0]["score"], .99)
+
+
+class ProgressTests(unittest.TestCase):
+    def test_parse_and_rules_report_actual_completed_counts(self):
+        events = []
+        logs = (log() + "\n") * 1001
+        result = dashboard.predict_payload({"logs": logs}, progress=events.append)
+        parse = [event for event in events if event["stage"] == "parse" and "completed" in event]
+        model = [event for event in events if event["stage"] == "model" and "completed" in event]
+        self.assertEqual([event["completed"] for event in parse], [0, 1000, 1001])
+        self.assertEqual([event["completed"] for event in model], [0, 1000, 1001])
+        self.assertTrue(all(event["total"] == 1001 for event in parse + model))
+        self.assertEqual(len(result["rows"]), 1001)
+        self.assertNotIn("tiers", result)
 
 
 class HTTPTests(unittest.TestCase):

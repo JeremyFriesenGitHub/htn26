@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from . import data, labels, features, models
+from .model_registry import TRAINED_MODELS
 
 from .model_store import model_store
 
@@ -56,17 +57,43 @@ def load_encoder():
         return pickle.load(f)
 
 
-def score_frame(df: pd.DataFrame, model="ae"):
-    enc = load_encoder()
+def load_model(model):
+    """Load the detector with the exact encoder used to train it."""
+    if model not in TRAINED_MODELS:
+        raise ValueError(f"Unknown trained model: {model}")
+    if model in ("gmm", "ae"):
+        artifact = "gmm.pkl" if model == "gmm" else "ae_meta.pkl"
+        with open(STORE / artifact, "rb") as f:
+            bundle = pickle.load(f)
+        encoder = bundle.get("encoder")
+        if encoder is None:
+            encoder = load_encoder()  # compatibility with the original model store
+        detector = _load_gmm() if model == "gmm" else _load_ae()
+    else:
+        with open(STORE / f"{model}.pkl", "rb") as f:
+            bundle = pickle.load(f)
+        encoder, detector = bundle["encoder"], bundle["detector"]
+    return encoder, detector
+
+
+def score_frame(df: pd.DataFrame, model="ae", progress=None):
+    def report(stage, message, **counts):
+        if progress:
+            progress({"type": "progress", "stage": stage, "message": message, **counts})
+
+    report("features", "Loading the trained feature encoder")
+    enc, det = load_model(model)
+    report("features", "Computing contextual request features")
     X = enc.transform(df)
-    det = _load_ae() if model == "ae" else _load_gmm()
     # absolute score where the detector offers one, so callers can calibrate it
     # against the training distribution instead of ranking within the batch
     scorer = getattr(det, "score_abs", det.score)
-    raw = np.asarray(scorer(X.values), float)
+    report("model", "Scoring requests with the saved detector")
+    raw = np.asarray(scorer(X if model == "rule_novelty" else X.values), float)
     from scipy.stats import rankdata
     pct = rankdata(raw) / len(raw)  # 0..1 percentile within this batch
-    reasons = _reasons(X)
+    report("reasons", "Collecting explanation tags", completed=0, total=len(X))
+    reasons = _reasons(X, progress=progress)
     out = df.copy()
     out["score"] = pct
     out["score_raw"] = raw
@@ -74,9 +101,9 @@ def score_frame(df: pd.DataFrame, model="ae"):
     return out.sort_values("score", ascending=False)
 
 
-def _reasons(X: pd.DataFrame):
+def _reasons(X: pd.DataFrame, progress=None):
     tags = []
-    for _, r in X.iterrows():
+    for position, (_, r) in enumerate(X.iterrows(), 1):
         t = []
         if r["ip_new_for_user"]: t.append("new-IP-for-user")
         if r["unseen_key"]: t.append("never-seen-endpoint")
@@ -85,6 +112,9 @@ def _reasons(X: pd.DataFrame):
         if r["user_resource_denied_rate"] > 0.5 and r["is_error"] == 0: t.append("success-on-usually-denied-resource")
         if r["status_for_key_rarity"] > 2: t.append("rare-status")
         tags.append(",".join(t) or "-")
+        if progress and (position % 1000 == 0 or position == len(X)):
+            progress({"type": "progress", "stage": "reasons", "message": "Collecting explanation tags",
+                      "completed": position, "total": len(X)})
     return tags
 
 
@@ -92,7 +122,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", help="file of raw Apache log lines to score")
     ap.add_argument("--demo", action="store_true", help="score the built-in March test window")
-    ap.add_argument("--model", choices=["ae", "gmm"], default="ae")
+    ap.add_argument("--model", choices=list(TRAINED_MODELS), default="ae")
     ap.add_argument("--top", type=int, default=20)
     args = ap.parse_args()
 

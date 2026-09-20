@@ -7,12 +7,17 @@
   <title>Log review</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='8' fill='%23232b38'/%3E%3Cpath d='M10 12h20M10 20h14M10 28h20' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
+  <script src="/review.js" defer></script>
+  <script src="/charts.js" defer></script>
+  <script src="/investigation.js" defer></script>
+  <script src="/model-lens.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="app-header"><div class="header-inner"><h1><span data-icon="logs"></span>Log review</h1><span id="connection" class="connection">Connecting to local server…</span></div></header>
   <main id="main">
+    <div class="export-actions"><button id="load-session" class="button secondary">Open saved investigation</button><input id="session-file" type="file" accept=".json,.json.gz,.gz,application/json,application/gzip" hidden></div>
     <div id="page-error" class="error-message" role="alert" hidden></div>
     <section id="input-panel" class="panel input-panel" aria-labelledby="input-title">
       <div class="panel-heading"><div><h2 id="input-title">Analyze access logs</h2><p>Upload an Apache log file or paste requests to find unusual activity.</p></div><button id="load-sample" class="button secondary">Try sample logs</button></div>
@@ -28,25 +33,67 @@
         <p class="model-help" id="model-help">Checking available models…</p>
         <details id="model-setup" class="model-setup" hidden><summary>Use a trained model</summary><p>Train the existing GMM and autoencoder on the project dataset with <code>python -m bench.train</code>, then start this dashboard with the same Python environment. Saved models are loaded from <code>results/model_store/</code>.</p></details>
         <div id="analyze-error" class="error-message" role="alert" hidden></div>
-        <div id="progress-message" class="progress-message" role="status" hidden></div>
+        <div id="processing-progress" class="processing-progress" hidden><div class="progress-heading"><strong id="progress-stage">Preparing analysis</strong><span id="progress-count"></span></div><progress id="progress-bar" max="100" aria-label="Analysis progress"></progress><p id="progress-message" role="status" aria-live="polite"></p></div>
       </form>
       <div class="input-footer"><span id="privacy-note">Processed on this computer. No external API calls.</span> <button class="text-button" id="cancel-input" hidden>Return to results</button></div>
     </section>
     <section id="results-panel" aria-labelledby="results-title" hidden>
-      <div class="results-heading"><div><h2 id="results-title">Analysis results</h2><p id="run-description"></p></div><button class="button secondary" id="new-analysis"><span data-icon="upload"></span>New analysis</button></div>
-      <div id="run-notice" class="run-notice"></div>
-      <div class="summary-strip"><div><span>Requests analyzed</span><strong id="stat-total">0</strong></div><div><span>Marked for review</span><strong id="stat-flagged">0</strong><small id="stat-rate"></small></div><div><span>Sources with flagged requests</span><strong id="stat-sources">0</strong></div></div>
-      <div class="context-grid"><section class="panel activity-panel" aria-labelledby="activity-title"><div class="compact-heading"><h3 id="activity-title">When requests were flagged</h3><span id="chart-period"></span></div><div id="activity-chart" class="activity-chart"></div><p class="chart-caption">Flagged requests by time · UTC</p></section><section class="panel sources-panel" aria-labelledby="sources-title"><div class="compact-heading"><h3 id="sources-title">Sources to review</h3><button id="clear-source" class="text-button" hidden>Clear filter</button></div><div id="source-list" class="source-list"></div></section></div><section class="panel" aria-labelledby="cluster-title"><div class="compact-heading"><h3 id="cluster-title">Request clustering</h3><span class="context-note">every request by score over time</span></div><div id="cluster-chart" class="activity-chart"></div><p class="chart-caption">Each dot is one request. Red dots are flagged; the cluster above the line is the incident.</p></section><section class="panel" aria-labelledby="users-title"><div class="compact-heading"><h3 id="users-title">Users</h3><button id="clear-user" class="text-button" hidden>Clear filter</button></div><div id="user-list" class="source-list"></div></section>
-      <section class="panel review-panel" aria-labelledby="review-title"><div class="review-heading"><div><h3 id="review-title">Review requests</h3><p>Open a request to see its signals and nearby activity from the same source and user.</p></div><button class="button secondary" id="export-results"><span data-icon="download"></span>Export CSV</button></div>
-        <div class="review-controls"><div class="filter-tabs" role="group" aria-label="Request filter"><button id="filter-flagged" class="tab active" aria-pressed="true">Flagged <span id="flagged-count">0</span></button><button id="filter-all" class="tab" aria-pressed="false">All requests</button></div><label class="threshold-label" for="threshold">Review cutoff <input id="threshold" type="number" min="0" max="100" step="1" value="75"><span>/ 100</span></label></div>
-        <div class="search-row"><label class="search-box"><span data-icon="search"></span><input id="search" type="search" aria-label="Search requests" placeholder="Search IP address, user, endpoint, or signal"></label><button id="active-source" class="active-source" title="Clear source filter" hidden></button></div>
-        <div class="table-scroll"><table id="request-table"><thead><tr><th scope="col" class="score-column" aria-sort="descending"><button id="sort-score">Score <span data-icon="arrow-down"></span></button></th><th scope="col">Request / signals</th><th scope="col">Source / user</th><th scope="col">Status</th><th scope="col">Time <small>UTC</small></th><th scope="col"><span class="sr-only">Inspect</span></th></tr></thead><tbody id="log-rows"></tbody></table></div>
-        <div class="table-footer"><span id="table-caption"></span><div class="pagination"><button id="previous-page" class="button secondary" aria-label="Previous page">Previous</button><span id="page-number"></span><button id="next-page" class="button secondary" aria-label="Next page">Next</button></div></div>
+      <div class="results-heading">
+        <div><h2 id="results-title">Investigations found</h2><p id="run-description"></p></div>
+        <div class="export-actions"><button class="button secondary" id="save-session">Save investigation data</button><button class="button secondary" id="new-analysis"><span data-icon="upload"></span>New analysis</button></div>
+      </div>
+      <div id="run-notice" class="run-notice" hidden></div>
+
+      <section id="overview-panel" aria-label="Candidate investigations">
+        <div class="overview-intro"><p>Follow related requests from the first unusual event to the last.</p><p class="field-hint">The selected detector supplies the candidates. Account and timing connect them into investigations you can review and refine.</p></div>
+        <div class="overview-filters" role="search" aria-label="Find an investigation">
+          <label class="overview-search" for="investigation-search">Search investigations<input id="investigation-search" type="search" placeholder="Account, source IP, or request target"></label>
+          <label for="investigation-account">Account<select id="investigation-account"><option value="">All accounts</option></select></label>
+          <label for="investigation-cutoff"><span id="investigation-cutoff-label">Review cutoff</span><span class="cutoff-input"><input id="investigation-cutoff" type="number" min="0" max="100" step="0.01" value="75" aria-describedby="investigation-cutoff-help"><span>/ 100</span></span></label>
+        </div>
+        <p id="investigation-cutoff-help" class="field-hint overview-filter-help">The cutoff chooses which requests enter the reconstruction. It is not attack confidence.</p>
+        <section class="panel overview-activity" aria-labelledby="overview-activity-title">
+          <div class="section-heading"><h3 id="overview-activity-title">When candidate requests occurred</h3><label class="checkbox-label"><input id="show-other-traffic" type="checkbox">Include other traffic</label></div>
+          <div id="overview-timeline-chart" class="activity-chart"></div>
+          <p id="overview-chart-caption" class="chart-caption"></p>
+        </section>
+        <div class="overview-list-heading"><h3>Candidate investigations</h3><p id="overview-counts" role="status"></p></div>
+        <div id="investigation-list" class="investigation-list"></div>
+        <p id="overview-empty" class="empty-state" hidden></p>
+        <nav class="overview-pagination" aria-label="Investigation pages"><button id="overview-previous" class="button secondary">Previous</button><span id="overview-page" aria-live="polite"></span><button id="overview-next" class="button secondary">Next</button></nav>
       </section>
-      <p id="score-explanation" class="score-explanation"></p>
+
+      <section id="investigation-workspace" aria-labelledby="investigation-title" hidden>
+        <div class="workspace-toolbar"><button id="back-investigations" class="text-button">← All investigations</button><div class="export-actions"><button id="export-investigation" class="button secondary"><span data-icon="download"></span>Export report</button><button id="export-investigation-csv" class="button secondary">Export records CSV</button></div></div>
+        <header class="investigation-heading"><h2 id="investigation-title" tabindex="-1">Investigation</h2><p id="investigation-meta"></p></header>
+        <div id="investigation-summary" class="investigation-summary"></div>
+        <details class="grouping-details"><summary>How this reconstruction was assembled</summary><p id="grouping-note"></p></details>
+
+        <div class="investigation-grid">
+          <div class="story-column">
+            <section class="story-workspace" aria-labelledby="timeline-title">
+              <div class="section-heading timeline-heading"><div><h3 id="timeline-title">Sequence of events</h3><p class="field-hint">Chronological · times in UTC</p></div><label class="checkbox-label"><input id="include-context" type="checkbox" checked>Include nearby context</label></div>
+              <div class="timeline-legend"><span><i class="candidate-key" aria-hidden="true"></i>Detector candidate</span><span><i class="context-key" aria-hidden="true"></i>Nearby context</span><button id="restore-events" class="text-button" disabled>Restore removed events</button></div>
+              <div id="episode-list" class="episode-list"></div>
+            </section>
+            <details class="panel baseline-panel"><summary>Compare with earlier activity</summary><div id="baseline-content"></div></details>
+            <section class="panel investigation-note-panel" aria-labelledby="investigation-note-title"><h3 id="investigation-note-title">Investigation notes</h3><p class="field-hint">Your interpretation, separate from the observed records.</p><label class="sr-only" for="add-investigation-note">Investigation notes</label><textarea id="add-investigation-note" rows="3" placeholder="What does this sequence suggest? Reference the events supporting your interpretation."></textarea><p id="investigation-notes" class="field-hint" role="status">Edits are kept in this session. Export the report to keep your reconstruction and notes.</p></section>
+          </div>
+
+          <aside id="evidence-workspace" class="panel evidence-workspace" aria-labelledby="evidence-heading">
+            <div class="evidence-workspace-heading"><h3 id="evidence-heading">Select an event or episode</h3><p class="field-hint">Evidence for your current timeline selection</p></div>
+            <section class="model-workspace" aria-labelledby="model-evidence-title">
+              <div class="model-workspace-heading"><h3 id="model-evidence-title">Model evidence</h3><label class="sr-only" for="evidence-model">Detector for this selection</label><select id="evidence-model"><option value="rules">Request rules</option></select></div>
+              <p id="model-run-status" class="model-run-status" role="status" aria-live="polite"></p>
+              <div id="model-evidence-content"><p class="empty-state">Select an episode or event to inspect the detector’s evidence.</p></div>
+              <details class="model-comparison-details"><summary>Compare detector perspectives</summary><div id="model-comparison"></div></details>
+            </section>
+            <section class="observed-evidence" aria-label="Observed records and analyst interpretation"><div id="evidence-content"><p class="empty-state">Choose an event to inspect its request fields, surrounding traffic, and original log record.</p></div></section>
+          </aside>
+        </div>
+      </section>
     </section>
   </main>
-  <dialog id="detail-dialog" class="detail-dialog" aria-labelledby="detail-title"><div class="detail-heading"><div><span id="detail-line" class="field-hint"></span><h2 id="detail-title">Request details</h2></div><button class="button secondary icon-button" id="close-detail" aria-label="Close request details"><span data-icon="x"></span></button></div><div id="detail-content"></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>

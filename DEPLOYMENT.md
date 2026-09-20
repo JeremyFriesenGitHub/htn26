@@ -32,9 +32,9 @@ Required artifacts:
 
 | Feature | Files |
 | --- | --- |
-| GMM | `encoder.pkl`, `gmm.pkl`, `calibration2_gmm.json` |
-| Deep AE | `encoder.pkl`, `ae_meta.pkl`, `ae_models.pt`, `calibration2_ae.json` |
-| Hybrid | GMM files plus `profiles.json` and `OPENAI_API_KEY` |
+| GMM | `encoder.pkl`, `gmm.pkl`, `calibration3_gmm.json` |
+| Deep AE | `encoder.pkl`, `ae_meta.pkl`, `ae_models.pt`, `calibration3_ae.json` |
+| Hybrid | GMM files plus `profiles.json`, `profiles.artifacts.json`, and `OPENAI_API_KEY` |
 
 The calibration files preserve training-baseline scores without shipping raw
 training logs. Without them, scoring falls back to percentiles within the upload.
