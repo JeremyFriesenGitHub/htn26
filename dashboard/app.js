@@ -98,10 +98,10 @@ async function predictStream(logs, model, report = updateProgress) {
 }
 function syncControls() {
   const hasInput = state.inputMode === "file" ? Boolean(state.file) : Boolean($("log-input").value.trim());
-  $("analyze-submit").disabled = !state.ready || state.busy || state.reading || !hasInput;
+  $("analyze-submit").disabled = !state.ready || state.busy || state.reading || !hasInput || !state.models.some((model)=>model.available&&model.id===$("model-select").value);
   $("analyze-submit").lastElementChild.textContent = state.busy ? "Analyzing…" : state.reading ? "Reading file…" : "Analyze logs";
   for (const id of ["load-sample","model-select","log-input","log-file","remove-file","tab-file","tab-paste"]) $(id).disabled = state.busy;
-  $("load-sample").disabled = !state.ready || state.busy || state.reading;
+  $("load-sample").disabled = !state.ready || state.busy || state.reading || !state.models.some((model)=>model.available&&model.id===$("model-select").value);
   $("cancel-input").disabled = state.busy;
   if (state.reading) updateProgress({stage:"file",message:"Reading your file. There is no upload size limit."});
   $("processing-progress").hidden = !state.busy && !state.reading;
@@ -142,7 +142,8 @@ function navigate(view) {
   }
 }
 function renderModelCatalog() {
-  $("model-catalog").innerHTML = state.models.length ? state.models.map((model) => `<article class="panel model-card"><div class="model-card-heading"><h3>${escapeHTML(model.name)}</h3><span class="model-availability ${model.available ? "available" : ""}">${model.available ? "Available" : "Unavailable"}</span></div><p>${escapeHTML(model.available ? model.detail : "This detector is not enabled on this server.")}</p><button class="button secondary" data-use-model="${escapeHTML(model.id)}" ${model.available ? "" : "disabled"}>${model.available ? "Use this model →" : "Not configured"}</button></article>`).join("") : "<p>Model information is unavailable. Check the server connection.</p>";
+  const models = state.models.filter((model) => model.available);
+  $("model-catalog").innerHTML = models.length ? models.map((model) => `<article class="panel model-card"><div class="model-card-heading"><h3>${escapeHTML(model.name)}</h3></div><p>${escapeHTML(model.detail)}</p><button class="button secondary" data-use-model="${escapeHTML(model.id)}">Use this model →</button></article>`).join("") : "<p>No models are currently available.</p>";
 }
 for (const button of document.querySelectorAll("[data-view]")) button.addEventListener("click", () => navigate(button.dataset.view));
 $("trace-home").addEventListener("click", () => navigate("analyze"));
@@ -189,12 +190,11 @@ function modelHelp() {
     ? "LLM triage sends the detector's top matches to OpenAI. Other requests stay on the analysis server."
     : "Processed on the analysis server. No external AI calls.";
   if (model?.id === "hybrid") { $("model-help").textContent = "The GMM ranks every line on the analysis server, then only its top slice is sent to OpenAI for review with each user\u2019s normal-access profile. This is the only option that sends log data to an external AI service."; return; }
-  $("model-help").textContent = model?.id === "rules" ? "Fixed rules score request fields and recent request patterns. No trained model or learned account baseline is used." : model ? "Ranks requests using the saved model. Results show the raw anomaly score and its training-baseline percentile separately; neither is attack confidence." : "No model information available.";
+  $("model-help").textContent = model ? "Ranks requests using the saved model. Results show the raw anomaly score and its training-baseline percentile separately; neither is attack confidence." : "No model information available.";
 }
 function renderModels() {
-  $("model-select").innerHTML = state.models.map((model) => `<option value="${escapeHTML(model.id)}" ${model.available ? "" : "disabled"}>${escapeHTML(model.id === "rules" ? "Preview rules" : model.name)}${model.available ? "" : " — unavailable"}</option>`).join("");
-  $("model-select").value = state.models.find((model) => model.available && model.id !== "rules")?.id || "rules";
-  $("model-setup").hidden = state.models.every((model) => model.available);
+  $("model-select").innerHTML = state.models.filter((model) => model.available).map((model) => `<option value="${escapeHTML(model.id)}">${escapeHTML(model.name)}</option>`).join("");
+  $("model-select").value = state.models.find((model) => model.available && model.id === "gmm")?.id || state.models.find((model) => model.available)?.id || "";
   modelHelp(); renderModelCatalog();
 }
 async function prepareRun(run) {
@@ -220,7 +220,7 @@ async function analyze(logs,model,source,synthetic=false) {
     $("investigation-account").innerHTML='<option value="">All accounts</option>'+Review.accountCounts(run.rows).map(([account])=>`<option value="${escapeHTML(account)}">${escapeHTML(accountName(account))}</option>`).join("");
     $("results-title").textContent="Investigations found";
     $("run-description").textContent=`${source} · ${number(run.rows.length)} requests · ${run.model_name}`;
-    $("run-notice").textContent=[synthetic?"Synthetic sample.":"",run.warning||"",run.external?"Shortlisted requests were sent to OpenAI for review.":"",run.mode==="heuristic"?"Fixed rule preview; no learned model baseline.":""].filter(Boolean).join(" ");
+    $("run-notice").textContent=[run.warning||"",run.external?"Shortlisted requests were sent to OpenAI for review.":""].filter(Boolean).join(" ");
     $("run-notice").hidden=!$("run-notice").textContent;
     rebuildInvestigations();showResults();toast(`${number(state.investigations.length)} candidate investigations found.`);
   } catch(error){showError("analyze-error",error.message);}
@@ -388,7 +388,7 @@ function renderEvidence(){
 }
 function renderModelEvidence(){
   const rows=selectedRows(),run=state.runs.get(state.activeModel);
-  $("evidence-model").innerHTML=state.models.map((model)=>`<option value="${escapeHTML(model.id)}" ${model.available||state.runs.has(model.id)?"":"disabled"}>${escapeHTML(model.name)}${state.runs.has(model.id)?" · analyzed":model.available?" · not run":" · unavailable"}</option>`).join("");
+  $("evidence-model").innerHTML=state.models.filter((model)=>model.available||state.runs.has(model.id)).map((model)=>`<option value="${escapeHTML(model.id)}" ${model.available||state.runs.has(model.id)?"":"disabled"}>${escapeHTML(model.name)}${state.runs.has(model.id)?" · analyzed":model.available?" · not run":" · unavailable"}</option>`).join("");
   $("evidence-model").value=state.activeModel;$("evidence-model").disabled=state.modelBusy;
   if(run){
     const selected=rows.map((row)=>run.rowsById.get(row.id)).filter(Boolean);
@@ -397,7 +397,7 @@ function renderModelEvidence(){
     const model=state.models.find((entry)=>entry.id===state.activeModel);
     $("model-evidence-content").innerHTML=`<p>This detector has not analyzed this upload. Your investigation and selection stay in place.</p>${model?.external||model?.id==="hybrid"?'<p class="field-hint">This option sends shortlisted logs and account profiles to OpenAI.</p>':""}<button id="run-evidence-model" class="button primary" ${state.modelBusy?"disabled":""}>${state.modelBusy?"Analyzing…":"Analyze this upload with "+escapeHTML(model?.name||state.activeModel)}</button>`;
   }
-    $("model-comparison").innerHTML=`<h4>Detector perspectives</h4><p class="field-hint">Same selected ${rows.length===1?"event":"events"}; separate cutoffs. Agreement is not independent confirmation.</p><div class="model-comparison-list">${state.models.map((model)=>{
+    $("model-comparison").innerHTML=`<h4>Detector perspectives</h4><p class="field-hint">Same selected ${rows.length===1?"event":"events"}; separate cutoffs. Agreement is not independent confirmation.</p><div class="model-comparison-list">${state.models.filter((model)=>model.available||state.runs.has(model.id)).map((model)=>{
     const scoredRun=state.runs.get(model.id),matched=scoredRun?rows.map((row)=>scoredRun.rowsById.get(row.id)).filter(Boolean):[];
     const cutoff=scoredRun===state.run?caseCutoff():scoredRun?defaultCutoff(scoredRun):null;
     const flagged=matched.filter((row)=>Review.isCandidate(row,cutoff)).length;
@@ -587,7 +587,7 @@ for(const element of document.querySelectorAll("[data-icon]"))element.innerHTML=
 for(const mode of ["file","paste"])$("tab-"+mode).addEventListener("click",()=>switchInput(mode));
 $("new-analysis").addEventListener("click",()=>{if(!state.modelBusy)showInput();});
 $("cancel-input").addEventListener("click",showResults);
-$("model-select").addEventListener("change",modelHelp);
+$("model-select").addEventListener("change",()=>{modelHelp();syncControls();});
 $("log-input").addEventListener("input",()=>{$("paste-count").textContent=`${number(lineCount($("log-input").value))} requests`;syncControls();});
 $("log-file").addEventListener("change",async()=>{await readFile($("log-file").files[0]);$("log-file").value="";});
 $("remove-file").addEventListener("click",()=>{state.revision++;state.reading=false;state.file=null;renderFile();syncControls();});
@@ -604,8 +604,8 @@ $("load-sample").addEventListener("click",async()=>{
   const revision=++state.revision;state.reading=true;syncControls();showError("analyze-error");
   try{
     const sample=await api("/api/sample");if(revision!==state.revision)return;
-    state.file={logs:sample.logs,name:"Synthetic sample logs",size:new TextEncoder().encode(sample.logs).length,lines:lineCount(sample.logs),synthetic:true};
-    state.reading=false;switchInput("file");renderFile();$("model-select").value="rules";modelHelp();await analyze(sample.logs,"rules",state.file.name,true);
+    state.file={logs:sample.logs,name:"example.txt",size:new TextEncoder().encode(sample.logs).length,lines:lineCount(sample.logs),synthetic:true};
+    state.reading=false;switchInput("file");renderFile();modelHelp();await analyze(sample.logs,$("model-select").value,state.file.name,true);
   }catch(error){showError("analyze-error",error.message);}
   finally{if(revision===state.revision){state.reading=false;syncControls();}}
 });
@@ -675,6 +675,6 @@ $("export-investigation").addEventListener("click",exportReport);
 $("export-investigation-csv").addEventListener("click",exportRawCSV);
 window.addEventListener("resize",()=>{clearTimeout(state.resizeTimer);state.resizeTimer=setTimeout(()=>{if(state.run&&!$("results-panel").hidden){if(state.caseId)renderModelEvidence();else renderOverview();}},150);});
 (async()=>{
-  try{const status=await api("/api/status");state.models=status.models;for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Models online":"Rules online";syncControls();}
+  try{const status=await api("/api/status");state.models=status.models.filter((model)=>model.id!=="rules"&&model.available);for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Models online":"No models available";syncControls();}
   catch(error){$("connection").textContent="Server unavailable";showError("page-error",error.message);}
 })();

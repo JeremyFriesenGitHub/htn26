@@ -32,7 +32,7 @@
     <section id="models-panel" aria-labelledby="models-title" hidden><div class="page-intro"><span class="eyebrow">Detection</span><h2 id="models-title">Find the right perspective.</h2><p>Explore the detectors available on this server. Each looks for unusual activity in a different way.</p></div><div id="model-catalog" class="model-catalog"><p>Checking available models…</p></div></section>
     <div id="page-error" class="error-message" role="alert" hidden></div>
     <section id="input-panel" class="panel input-panel" aria-labelledby="input-title">
-      <div class="panel-heading"><div><span class="eyebrow">Start an investigation</span><h2 id="input-title">Follow the trace.</h2><p>Upload an Apache log file or paste requests to find unusual activity.</p></div><button id="load-sample" class="button secondary">Try sample logs</button></div>
+      <div class="panel-heading"><div><span class="eyebrow">Start an investigation</span><h2 id="input-title">Follow the trace.</h2><p>Upload an Apache log file or paste requests to find unusual activity.</p></div><button id="load-sample" class="button secondary">Try example.txt</button></div>
       <div class="input-tabs" role="group" aria-label="Log input method"><button id="tab-file" class="tab active" aria-pressed="true">Upload a file</button><button id="tab-paste" class="tab" aria-pressed="false">Paste logs</button></div>
       <form id="analyze-form">
         <div id="file-input-panel">
@@ -43,7 +43,6 @@
         <div id="paste-input-panel" hidden><label class="field-label" for="log-input">Log lines</label><textarea id="log-input" spellcheck="false" placeholder='10.0.5.12 - sarah_j [15/Mar/2026:11:07:57 -0400] "POST /api/admin/role_update HTTP/1.1" 200 512'></textarea><p id="paste-count" class="field-hint">One request per line. Blank lines are ignored.</p></div>
         <div class="analysis-controls"><div class="model-field"><label class="field-label" for="model-select">Analyze with</label><select id="model-select"><option value="rules">Preview rules</option></select></div><button class="button primary" id="analyze-submit" type="submit" disabled><span data-icon="search"></span><span>Analyze logs</span></button></div>
         <p class="model-help" id="model-help">Checking available models…</p>
-        <details id="model-setup" class="model-setup" hidden><summary>Use a trained model</summary><p>Train the existing GMM and autoencoder on the project dataset with <code>python -m bench.train</code>, then start this dashboard with the same Python environment. Saved models are loaded from <code>results/model_store/</code>.</p></details>
         <div id="analyze-error" class="error-message" role="alert" hidden></div>
         <div id="processing-progress" class="processing-progress" hidden><div class="progress-heading"><strong id="progress-stage">Preparing analysis</strong><span id="progress-count"></span></div><progress id="progress-bar" max="100" aria-label="Analysis progress"></progress><p id="progress-message" role="status" aria-live="polite"></p></div>
       </form>

@@ -201,8 +201,7 @@ def _hybrid_status():
 
 
 def model_status():
-    result = [{"id": "rules", "name": MODEL_NAMES["rules"], "available": True,
-               "detail": "Local, deterministic request rules; no trained model or learned user baseline."}]
+    result = []
     result.append(_hybrid_status())
     for model, artifacts in MODEL_FILES.items():
         missing = [name for name in artifacts if not (STORE / name).is_file()]
@@ -640,8 +639,8 @@ def domain_note(records, flagged_share):
     if share >= 0.5:
         return ("%.0f%% of these requests come from users or addresses the model has never "
                 "seen, so almost everything looks novel to it. These trained models only "
-                "apply to the system they were trained on - use Heuristic preview for "
-                "unfamiliar logs." % (share * 100))
+                "apply to the system they were trained on. Results for unfamiliar logs "
+                "may not be meaningful." % (share * 100))
     if flagged_share >= 0.2:
         return ("%.0f%% of this upload exceeds the default review cutoff. A high detector score "
                 "does not establish an incident; inspect the requests and their context." % (flagged_share * 100))
@@ -652,9 +651,9 @@ def predict_payload(payload, progress=None):
     start = time.perf_counter()
     if not isinstance(payload, dict):
         raise APIError("Send a JSON object with logs and model fields.")
-    model = payload.get("model", "rules")
-    if not isinstance(model, str) or model not in MODEL_NAMES:
-        raise APIError("Choose a supported model: " + ", ".join(MODEL_NAMES) + ".")
+    model = payload.get("model", "gmm")
+    if not isinstance(model, str) or model not in MODEL_NAMES or model == "rules":
+        raise APIError("Choose a supported model: " + ", ".join(name for name in MODEL_NAMES if name != "rules") + ".")
     records = parse_logs(payload.get("logs"), progress=progress)
     warning = None
     triage = None
@@ -758,7 +757,7 @@ def sample_payload():
             timestamp.day, months[timestamp.month - 1], timestamp.year,
             timestamp.hour, timestamp.minute, timestamp.second)
         lines.append('%s - %s [%s] "%s %s HTTP/1.1" %d %d' % (ip, user, date, method, path, status, size))
-    return {"name": "Synthetic sample · September 13–19, 2026", "logs": "\n".join(lines) + "\n"}
+    return {"name": "example.txt", "logs": "\n".join(lines) + "\n"}
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
