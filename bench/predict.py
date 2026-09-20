@@ -55,17 +55,26 @@ def load_encoder():
         return pickle.load(f)
 
 
-def score_frame(df: pd.DataFrame, model="ae"):
+def score_frame(df: pd.DataFrame, model="ae", progress=None):
+    def report(stage, message, **counts):
+        if progress:
+            progress({"type": "progress", "stage": stage, "message": message, **counts})
+
+    report("features", "Loading the trained feature encoder")
     enc = load_encoder()
+    report("features", "Computing contextual request features")
     X = enc.transform(df)
+    report("model", "Loading the saved detector")
     det = _load_ae() if model == "ae" else _load_gmm()
     # absolute score where the detector offers one, so callers can calibrate it
     # against the training distribution instead of ranking within the batch
     scorer = getattr(det, "score_abs", det.score)
+    report("model", "Scoring requests with the saved detector")
     raw = np.asarray(scorer(X.values), float)
     from scipy.stats import rankdata
     pct = rankdata(raw) / len(raw)  # 0..1 percentile within this batch
-    reasons = _reasons(X)
+    report("reasons", "Collecting explanation tags", completed=0, total=len(X))
+    reasons = _reasons(X, progress=progress)
     out = df.copy()
     out["score"] = pct
     out["score_raw"] = raw
@@ -73,9 +82,9 @@ def score_frame(df: pd.DataFrame, model="ae"):
     return out.sort_values("score", ascending=False)
 
 
-def _reasons(X: pd.DataFrame):
+def _reasons(X: pd.DataFrame, progress=None):
     tags = []
-    for _, r in X.iterrows():
+    for position, (_, r) in enumerate(X.iterrows(), 1):
         t = []
         if r["ip_new_for_user"]: t.append("new-IP-for-user")
         if r["unseen_key"]: t.append("never-seen-endpoint")
@@ -84,6 +93,9 @@ def _reasons(X: pd.DataFrame):
         if r["user_resource_denied_rate"] > 0.5 and r["is_error"] == 0: t.append("success-on-usually-denied-resource")
         if r["status_for_key_rarity"] > 2: t.append("rare-status")
         tags.append(",".join(t) or "-")
+        if progress and (position % 1000 == 0 or position == len(X)):
+            progress({"type": "progress", "stage": "reasons", "message": "Collecting explanation tags",
+                      "completed": position, "total": len(X)})
     return tags
 
 

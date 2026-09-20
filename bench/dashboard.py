@@ -7,6 +7,7 @@ model artifacts are present. Uploaded logs remain in memory for the request only
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left, bisect_right
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,7 @@ HYBRID_TOPK = 60  # only the detector's shortlist is sent for review
 MODEL_FILES = {"gmm": ("encoder.pkl", "gmm.pkl"),
                "ae": ("encoder.pkl", "ae_meta.pkl", "ae_models.pt")}
 SCORING_LOCK = threading.Lock()
+HYBRID_LOCK = threading.Lock()
 MONTHS = {name: i for i, name in enumerate(
     ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1)}
 LINE_RX = re.compile(
@@ -81,7 +83,15 @@ class LogRecord:
         return row
 
 
-def parse_logs(logs):
+def report_progress(progress, stage, message, completed=None, total=None):
+    if progress:
+        event = {"type": "progress", "stage": stage, "message": message}
+        if completed is not None:
+            event.update(completed=completed, total=total)
+        progress(event)
+
+
+def parse_logs(logs, progress=None):
     """Strict CLF/combined parsing with original, one-based physical line IDs."""
     if not isinstance(logs, str):
         raise APIError("The logs field must be text.")
@@ -92,8 +102,11 @@ def parse_logs(logs):
     lines = logs.split("\n")
     if lines and not lines[-1]:
         lines.pop()
+    report_progress(progress, "parse", "Parsing Apache log lines", 0, len(lines))
     records = []
     for line_number, raw in enumerate(lines, 1):
+        if line_number > 1 and (line_number - 1) % 1000 == 0:
+            report_progress(progress, "parse", "Parsing Apache log lines", line_number - 1, len(lines))
         raw = raw.removesuffix("\r")
         if not raw.strip(" \t"):
             continue
@@ -153,6 +166,7 @@ def parse_logs(logs):
                                  values["proto"], int(values["status"]), response_bytes, raw))
     if not records:
         raise APIError("Add at least one Apache log line before running analysis.")
+    report_progress(progress, "parse", "Log lines parsed", len(lines), len(lines))
     return records
 
 
@@ -206,7 +220,7 @@ def model_status():
     return {"models": result, "max_bytes": None, "max_lines": None}
 
 
-def score_rules(records):
+def score_rules(records, progress=None):
     """Weighted indicators, with strictly prior same-actor login failures.
 
     The preview has no training state. Every request starts at 0.04, receives
@@ -217,7 +231,10 @@ def score_rules(records):
     pending = []
     previous_time = None
     rows = []
-    for record in sorted(records, key=lambda row: (row.timestamp, row.id)):
+    report_progress(progress, "model", "Ordering requests by time")
+    ordered = sorted(records, key=lambda row: (row.timestamp, row.id))
+    report_progress(progress, "model", "Applying heuristic rules", 0, len(ordered))
+    for position, record in enumerate(ordered, 1):
         if previous_time != record.timestamp:
             for actor, timestamp in pending:
                 failures[actor].append(timestamp)
@@ -275,108 +292,139 @@ def score_rules(records):
             score += 0.08
             reasons.append("outside-07-to-20-hours")
         rows.append(record.public(round(min(0.99, score), 4), reasons))
+        if position % 1000 == 0 or position == len(ordered):
+            report_progress(progress, "model", "Applying heuristic rules", position, len(ordered))
     return sorted(rows, key=lambda row: (-row["score"], row["id"]))
 
 
 CALIBRATION_LOCK = threading.Lock()
 _CALIBRATION = {}
-# A calibrated score is the fraction of TRAINING traffic that scored lower, so
-# 0.99999 reads "more unusual than 99.999% of normal activity". The grid is dense
-# in the tail because that is the only part that decides an alert: a coarse grid
-# saturates at 1.0 and hundreds of ordinary lines tie there.
-CALIBRATION_LEVELS = None  # built lazily by _levels()
-# One tier. A percentile cutoff flags a fixed FRACTION of whatever is uploaded
-# (99% of 180k lines is ~1,800 alerts), so the bar sits where clean training
-# traffic essentially never reaches: ~22 alerts across the whole 180k corpus.
-RED_THRESHOLD = 0.99999
-TIER_THRESHOLDS = {"red": RED_THRESHOLD}
 
 
-def calibration(model):
-    """Quantiles of the model's score over training traffic, cached on disk.
+def _calibration_identity(model):
+    """Invalidate baseline scores if the encoder or detector is replaced."""
+    return [[name, (STORE / name).stat().st_size, (STORE / name).stat().st_mtime_ns]
+            for name in MODEL_FILES[model] if (STORE / name).is_file()]
 
-    Batch percentiles are meaningless for a small upload - paste five ordinary
-    lines and one still ranks top. Calibrating against the training distribution
-    gives an absolute reading that does not depend on what else was uploaded.
-    """
-    if model in _CALIBRATION:
-        return _CALIBRATION[model]
+
+def _validated_grid(loaded):
+    if not isinstance(loaded, dict):
+        return None
+    try:
+        values = [float(v) for v in loaded["values"]]
+        levels = [float(v) for v in loaded["levels"]]
+        if not values or len(values) != len(levels):
+            return None
+        if any(not math.isfinite(v) for v in values + levels):
+            return None
+        if any(a > b for a, b in zip(values, values[1:])) or any(a > b for a, b in zip(levels, levels[1:])):
+            return None
+        if levels[0] < 0 or levels[-1] > 1:
+            return None
+        grid = {"values": values, "levels": levels, "kind": "quantile"}
+        if loaded.get("kind") == "empirical":
+            upper = [float(v) for v in loaded["upper"]]
+            if (len(upper) != len(values) or any(not math.isfinite(v) for v in upper)
+                    or any(a >= b for a, b in zip(values, values[1:]))
+                    or any(a > b for a, b in zip(upper, upper[1:]))
+                    or any(not 0 <= mid <= hi <= 1 for mid, hi in zip(levels, upper))):
+                return None
+            grid.update(kind="empirical", upper=upper, sample_size=int(loaded["sample_size"]))
+        return grid
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return None
+
+
+def calibration(model, progress=None):
+    """Training-score distribution, never an attack probability or target count."""
+    identity = _calibration_identity(model)
+    key = (str(STORE), model, repr(identity))
+    if key in _CALIBRATION:
+        return _CALIBRATION[key]
+    report_progress(progress, "calibration", "Loading the training-score baseline")
     with CALIBRATION_LOCK:
-        if model in _CALIBRATION:
-            return _CALIBRATION[model]
-        cache = STORE / ("calibration2_%s.json" % model)
+        if key in _CALIBRATION:
+            return _CALIBRATION[key]
+        cache = STORE / ("calibration3_%s.json" % model)
         grid = None
         if cache.is_file():
             try:
                 loaded = json.loads(cache.read_text())
-                if (isinstance(loaded, dict) and loaded.get("levels")
-                        and len(loaded["levels"]) == len(loaded.get("values", []))):
-                    grid = {"levels": [float(v) for v in loaded["levels"]],
-                            "values": [float(v) for v in loaded["values"]]}
+                if isinstance(loaded, dict) and loaded.get("artifacts") == identity:
+                    grid = _validated_grid(loaded)
             except (OSError, ValueError, TypeError):
                 grid = None
         if grid is None:
-            grid = _build_calibration(model)
+            grid = _build_calibration(model, progress=progress)
             if grid is not None:
                 try:
-                    cache.write_text(json.dumps(grid))
+                    cache.write_text(json.dumps({**grid, "artifacts": identity}))
                 except OSError:
                     pass
-        _CALIBRATION[model] = grid
+        if grid is not None:
+            _CALIBRATION[key] = grid
         return grid
 
 
-def _build_calibration(model):
-    """Score the training window once to learn what normal looks like."""
+def _build_calibration(model, progress=None):
+    """Keep the empirical score distribution, including the mass of ties."""
     try:
         import numpy as np
         from . import data as data_module, predict
+        report_progress(progress, "calibration", "Reading the training window for baseline calibration")
         frame = data_module.load()
         frame = frame[frame.ts < data_module.VAL_END]
         if not len(frame):
             return None
-        # No subsampling: the alert bar sits at the 99.999th percentile, and a
-        # sample blurs exactly the tail that decides it.
-        scored = predict.score_frame(frame.sort_values("ts").reset_index(drop=True), model=model)
+        def baseline_progress(event):
+            report_progress(progress, "calibration", "Baseline: " + event["message"],
+                            event.get("completed"), event.get("total"))
+        with SCORING_LOCK:
+            scored = predict.score_frame(frame.sort_values("ts").reset_index(drop=True),
+                                         model=model, progress=baseline_progress if progress else None)
         if "score_raw" not in scored:
             return None
         raw = np.asarray(scored["score_raw"], dtype=float)
         raw = raw[np.isfinite(raw)]
-        if raw.size < 100:
+        if not raw.size:
             return None
-        levels = np.unique(np.concatenate([
-            np.linspace(0.0, 0.99, 400),
-            np.linspace(0.99, 0.999, 200),
-            np.linspace(0.999, 0.9999, 200),
-            np.linspace(0.9999, 1.0, 200)]))
-        return {"levels": [float(v) for v in levels],
-                "values": [float(v) for v in np.quantile(raw, levels)]}
+        values, counts = np.unique(raw, return_counts=True)
+        cumulative = np.cumsum(counts)
+        return {"kind": "empirical", "sample_size": int(raw.size),
+                "values": values.tolist(),
+                "levels": ((cumulative - counts / 2) / raw.size).tolist(),
+                "upper": (cumulative / raw.size).tolist()}
     except Exception:
         return None  # calibration is an enhancement; scoring still works without it
 
 
 def calibrated_score(grid, raw):
-    """Fraction of the training distribution at or below `raw`, in [0, 1]."""
+    """Baseline percentile: P(score < raw) + half the probability mass at ties.
+
+    Legacy quantile grids are interpolated rather than rounded up to the next
+    quantile. Values beyond the observed maximum have percentile 1; that limit
+    says nothing about the distance beyond it, which the raw score preserves.
+    """
     values, levels = grid["values"], grid["levels"]
-    low, high = 0, len(values)
-    while low < high:
-        mid = (low + high) // 2
-        if values[mid] <= raw:
-            low = mid + 1
-        else:
-            high = mid
-    return float(levels[min(low, len(levels) - 1)]) if low else 0.0
+    left, right = bisect_left(values, raw), bisect_right(values, raw)
+    if left != right:
+        return (levels[left] + levels[right - 1]) / 2
+    if left == 0:
+        return 0.0
+    if left == len(values):
+        return 1.0
+    if grid.get("kind") == "empirical":
+        return grid["upper"][left - 1]
+    fraction = (raw - values[left - 1]) / (values[left] - values[left - 1])
+    return levels[left - 1] + fraction * (levels[left] - levels[left - 1])
 
 
-def tier_for(score):
-    return "red" if score >= RED_THRESHOLD else "green"
-
-
-def score_trained(records, model):
+def score_trained(records, model, progress=None):
     # Imports stay inside this path so the preview starts without ML packages.
     import pandas as pd
     from . import data, predict
 
+    report_progress(progress, "features", "Preparing requests for the trained encoder")
     frame = pd.DataFrame([{"ip": r.ip, "ident": r.ident, "user": r.user,
                            "ts": r.timestamp, "method": r.method, "path": r.path,
                            "proto": r.proto, "status": r.status, "bytes": r.bytes,
@@ -387,39 +435,33 @@ def score_trained(records, model):
     # off-hours features and correctly ordering mixed-offset submissions.
     frame["ts"] = pd.to_datetime(frame["ts"], utc=True).dt.tz_convert(records[0].timestamp.tzinfo)
     with SCORING_LOCK:
-        scored = predict.score_frame(frame, model=model)
-    # Prefer the absolute score calibrated against training traffic; fall back to
-    # the batch percentile when either is unavailable.
+        scored = predict.score_frame(frame, model=model, **({"progress": progress} if progress else {}))
     columns = getattr(scored, "columns", ())
-    grid = calibration(model) if "score_raw" in columns else None
+    grid = calibration(model, progress=progress) if "score_raw" in columns else None
     originals = {r.id: r for r in records}
     result = []
     seen = set()
-    for _, row in scored.iterrows():
+    report_progress(progress, "results", "Preparing scored requests", 0, len(records))
+    for position, (_, row) in enumerate(scored.iterrows(), 1):
         source_id, score = int(row["src_line"]), float(row["score"])
         if source_id not in originals or source_id in seen or not math.isfinite(score) or not 0 <= score <= 1:
             raise APIError("The saved model returned invalid results. Check or regenerate the model store.", 503)
         seen.add(source_id)
-        tier = None
-        raw = None
-        if grid:
-            raw = float(row["score_raw"])
-            if not math.isfinite(raw):
-                raise APIError("The saved model returned invalid results. Check or regenerate the model store.", 503)
-            score = calibrated_score(grid, raw)
-            tier = tier_for(score)
+        raw = float(row["score_raw"]) if "score_raw" in columns else None
+        if raw is not None and not math.isfinite(raw):
+            raise APIError("The saved model returned invalid results. Check or regenerate the model store.", 503)
+        baseline = calibrated_score(grid, raw) if grid is not None and raw is not None else None
         tags = str(row["reasons"])
         reasons = [tag for tag in tags.split(",") if tag and tag != "-"]
-        public = originals[source_id].public(score, reasons, tier)
-        # Calibrated scores saturate at 1.0, so many lines tie there. Order by the
-        # raw score or the worst offenders hide behind whichever tied line is first.
-        public["_raw"] = raw if raw is not None else score
+        public = originals[source_id].public(baseline if baseline is not None else score, reasons)
+        public.update(raw_score=raw, batch_percentile=score, baseline_percentile=baseline,
+                      above_baseline=raw > grid["values"][-1] if grid is not None and raw is not None else None)
         result.append(public)
+        if position % 1000 == 0 or position == len(records):
+            report_progress(progress, "results", "Preparing scored requests", position, len(records))
     if len(result) != len(records):
         raise APIError("The saved model returned incomplete results. Check or regenerate the model store.", 503)
-    result.sort(key=lambda row: (-row["_raw"], row["id"]))
-    for row in result:
-        row.pop("_raw", None)
+    result.sort(key=lambda row: (-(row["raw_score"] if row["raw_score"] is not None else row["score"]), row["id"]))
     return result
 
 
@@ -457,63 +499,82 @@ def user_profiles():
         return profiles
 
 
-def score_hybrid(records):
-    """GMM ranks every line; the LLM reviews only the top slice, with profiles.
+def _call_llm(prompt):
+    """Keep the provider's module-level configuration scoped to this call."""
+    from . import hybrid
+    from . import llm_baseline as provider_module
+    with HYBRID_LOCK:
+        names = ("SYSTEM", "SCHEMA", "MAX_OUT", "REASONING_EFFORT")
+        saved = {name: getattr(provider_module, name) for name in names}
+        try:
+            provider_module.SYSTEM, provider_module.SCHEMA = hybrid.SYSTEM, hybrid.SCHEMA
+            provider_module.MAX_OUT, provider_module.REASONING_EFFORT = 16000, "low"
+            provider = provider_module.OpenAIProvider("gpt-5")
+            parsed, _, _ = provider.classify(prompt)
+            return parsed
+        finally:
+            for name, value in saved.items():
+                setattr(provider_module, name, value)
 
-    The review queue becomes exactly what the LLM confirms: confirmed lines are
-    pushed above the amber cutoff, everything else below it.
-    """
-    rows = score_trained(records, "gmm")
-    if not rows or "tier" not in rows[0]:
-        raise APIError("LLM triage needs the calibrated GMM; regenerate the model store.", 503)
+
+def score_hybrid(records, progress=None):
+    """Add LLM verdicts to a detector shortlist without changing detector scores."""
+    rows = score_trained(records, "gmm", progress=progress)
     shortlist = rows[:min(HYBRID_TOPK, len(rows))]
+    report_progress(progress, "llm", "Loading user access profiles for the shortlist")
     profiles = user_profiles()
-    by_id = {row["id"]: row for row in rows}
-
     lines = []
     for position, row in enumerate(shortlist, 1):
         profile = profiles.get(row["user"], {})
         lines.append(
             "ALERT %d:\n    line: %s\n    user profile: usual_ips=%s, normally_accesses=%s, "
-            "normally_denied=%s\n    detector score: %.4f  signals: %s" % (
+            "normally_denied=%s\n    raw detector score: %s  signals: %s" % (
                 position, row["raw"], profile.get("usual_ips"),
                 profile.get("normally_accesses"), profile.get("normally_denied"),
-                row["score"], ", ".join(row["reasons"]) or "none"))
+                row.get("raw_score"), ", ".join(row["reasons"]) or "none"))
     prompt = ("Triage these detector alerts. Use each alert's profile: authorised access to "
-              "sensitive files IS normal when it matches the user's profile.\n\n"
+              "sensitive files IS normal when it matches the user's profile. Missing profiles "
+              "are unknown; do not assume that their absence implies unauthorized access.\n\n"
               + "\n\n".join(lines) + "\n\nReturn a verdict for every alert id as JSON.")
-
-    from . import hybrid
-    from . import llm_baseline as L
-    provider = L.OpenAIProvider("gpt-5")
-    L.SYSTEM, L.SCHEMA = hybrid.SYSTEM, hybrid.SCHEMA
-    L.MAX_OUT, L.REASONING_EFFORT = 16000, "low"
-    parsed, _, _ = provider.classify(prompt)
-    verdicts = {int(v["id"]): v for v in parsed.get("verdicts", []) if "id" in v}
+    report_progress(progress, "llm", "OpenAI is reviewing %d shortlisted requests" % len(shortlist))
+    parsed = _call_llm(prompt)
+    candidates = parsed.get("verdicts", []) if isinstance(parsed, dict) else []
+    if not isinstance(candidates, list):
+        candidates = []
+    verdicts, duplicates = {}, set()
+    for verdict in candidates:
+        if not isinstance(verdict, dict):
+            continue
+        position = verdict.get("id")
+        if type(position) is not int or not 1 <= position <= len(shortlist):
+            continue
+        if position in verdicts:
+            duplicates.add(position)
+        if (type(verdict.get("is_incident")) is not bool
+                or not isinstance(verdict.get("reason"), str)):
+            continue
+        verdicts[position] = verdict
+    for position in duplicates:
+        verdicts.pop(position, None)
     if not verdicts:
-        raise APIError("The LLM returned no verdicts for this upload.", 503)
-
-    confirmed = 0
+        raise APIError("The LLM returned no valid, unambiguous verdicts for this upload.", 503)
+    for row in rows:
+        row.update(triage="unreviewed", triage_reason=None)
+    flagged = cleared = 0
     for position, row in enumerate(shortlist, 1):
         verdict = verdicts.get(position)
         if verdict is None:
             continue
-        target = by_id[row["id"]]
-        reason = str(verdict.get("reason", "")).strip()
-        if verdict.get("is_incident"):
-            confirmed += 1
-            target["score"] = max(target["score"], RED_THRESHOLD)
-            target["tier"] = "red"
-            target["reasons"] = target["reasons"] + (["LLM: " + reason] if reason else [])
-        else:
-            target["score"] = min(target["score"], 0.98)
-            target["tier"] = "green"
-            target["reasons"] = target["reasons"] + (["LLM cleared: " + reason] if reason else [])
-    # anything the LLM never saw is not an alert
-    for row in rows[len(shortlist):]:
-        row["score"] = min(row["score"], 0.98)
-        row["tier"] = "green"
-    return rows, confirmed, len(shortlist)
+        row["triage"] = "flagged" if verdict["is_incident"] else "cleared"
+        row["triage_reason"] = verdict["reason"].strip()
+        flagged += int(verdict["is_incident"])
+        cleared += int(not verdict["is_incident"])
+    reviewed = flagged + cleared
+    report_progress(progress, "llm", "Received %d valid verdicts for %d submitted requests" % (reviewed, len(shortlist)),
+                    reviewed, len(shortlist))
+    return rows, {"submitted": len(shortlist), "reviewed": reviewed, "flagged": flagged,
+                  "cleared": cleared, "unreviewed": len(rows) - reviewed,
+                  "missing_verdicts": len(shortlist) - reviewed}
 
 
 _KNOWN = {}
@@ -556,78 +617,76 @@ def domain_note(records, flagged_share):
                 "apply to the system they were trained on - use Heuristic preview for "
                 "unfamiliar logs." % (share * 100))
     if flagged_share >= 0.2:
-        return ("%.0f%% of this upload was flagged. That usually means the log does not "
-                "resemble the training traffic; treat the ranking as relative, not as "
-                "%d separate incidents." % (flagged_share * 100, int(flagged_share * len(records))))
+        return ("%.0f%% of this upload exceeds the default review cutoff. A high detector score "
+                "does not establish an incident; inspect the requests and their context." % (flagged_share * 100))
     return None
 
 
-def predict_payload(payload):
+def predict_payload(payload, progress=None):
     start = time.perf_counter()
     if not isinstance(payload, dict):
         raise APIError("Send a JSON object with logs and model fields.")
     model = payload.get("model", "rules")
     if not isinstance(model, str) or model not in MODEL_NAMES:
-        raise APIError("Choose rules, gmm, or ae as the model.")
-    records = parse_logs(payload.get("logs"))
-    if model == "hybrid":
-        status = next(item for item in model_status()["models"] if item["id"] == "hybrid")
-        if not status["available"]:
-            raise APIError(status["detail"], 503)
-        try:
-            rows, confirmed, reviewed = score_hybrid(records)
-        except APIError:
-            raise
-        except Exception:
-            raise APIError("LLM triage could not complete. Check OPENAI_API_KEY and connectivity.", 503) from None
-        hybrid_warning = domain_note(records, confirmed / max(len(rows), 1))
-        return {"model": model, "model_name": MODEL_NAMES[model], "mode": "trained",
-                "score_kind": "triaged", "external": True,
-                **({"warning": hybrid_warning} if hybrid_warning else {}),
-                "notice": ("The GMM ranked every line locally; the top %d were sent to OpenAI for "
-                           "review with each user's normal-access profile. %d were confirmed and "
-                           "appear in the review queue; the rest were cleared. Log lines left this "
-                           "machine for that step." % (reviewed, confirmed)),
-                "tiers": dict(TIER_THRESHOLDS),
-                "elapsed_ms": round((time.perf_counter() - start) * 1000, 2), "rows": rows}
+        raise APIError("Choose rules, gmm, ae, or hybrid as the model.")
+    records = parse_logs(payload.get("logs"), progress=progress)
     warning = None
+    triage = None
     if model == "rules":
-        rows = score_rules(records)
+        rows = score_rules(records, progress=progress)
+        kind = "heuristic"
+        threshold = 0.75
         notice = ("Heuristic preview uses fixed request rules and earlier same-IP/user login failures "
                   "in this upload. It has no learned user baseline. Scores are review indicators, "
                   "not attack probabilities; legitimate activity can trigger them.")
     else:
+        report_progress(progress, "model", "Checking saved model availability")
         status = next(item for item in model_status()["models"] if item["id"] == model)
         if not status["available"]:
             raise APIError(status["detail"], 503)
         try:
-            rows = score_trained(records, model)
+            if model == "hybrid":
+                rows, triage = score_hybrid(records, progress=progress)
+            else:
+                rows = score_trained(records, model, progress=progress)
         except APIError:
             raise
+        except (BrokenPipeError, ConnectionResetError):
+            raise
         except Exception:
-            raise APIError("The saved model could not score this upload. Check that its artifacts "
-                           "match the installed dependencies, or regenerate them with python -m bench.train.", 503) from None
-        calibrated = bool(rows) and "tier" in rows[0]
-        warning = domain_note(records, sum(1 for r in rows if r.get("tier") == "red") / max(len(rows), 1))
+            message = ("LLM triage could not complete. Check OPENAI_API_KEY and connectivity." if model == "hybrid"
+                       else "The saved model could not score this upload. Check that its artifacts match the "
+                            "installed dependencies, or regenerate them with python -m bench.train.")
+            raise APIError(message, 503) from None
+        calibrated = bool(rows) and rows[0].get("baseline_percentile") is not None
+        kind = "calibrated" if calibrated else "percentile"
+        threshold = 0.999 if calibrated else 0.98
+        warning = domain_note(records, sum(row["score"] >= threshold for row in rows) / len(rows))
         if calibrated:
-            notice = ("Scores are calibrated against the training baseline: 0.990 means more unusual "
-                      "than 99% of normal traffic. They measure how unusual a request is for that "
-                      "user, not the probability of an attack; legitimate activity can rank highly.")
+            notice = ("Raw detector scores rank requests. Baseline percentiles compare those scores with "
+                      "the saved model's training-score distribution, using midpoint ranks for ties. "
+                      "Scores above the observed baseline maximum share a percentile of 1; their raw "
+                      "scores still distinguish them. These are not attack probabilities.")
         else:
-            notice = ("Trained model scores are percentiles within this uploaded batch, not attack "
-                      "probabilities. A high percentile only identifies a request that ranks highly "
-                      "in this batch; it does not confirm an attack.")
-    payload = {"model": model, "model_name": MODEL_NAMES[model],
-               "mode": "heuristic" if model == "rules" else "trained",
-               "score_kind": "heuristic" if model == "rules" else
-                             ("calibrated" if calibrated else "percentile"),
-               "notice": notice, "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
-               "rows": rows}
-    if model != "rules" and calibrated:
-        payload["tiers"] = dict(TIER_THRESHOLDS)
-    if model != "rules" and warning:
-        payload["warning"] = warning
-    return payload
+            notice = ("Raw detector scores rank requests. The training-score baseline is unavailable, "
+                      "so percentiles describe only this uploaded batch, not attack probabilities.")
+        if triage:
+            notice += (" OpenAI reviewed %d of %d submitted requests and flagged %d. "
+                       "%d requests remain unreviewed. Verdicts do not change detector scores. "
+                       "Shortlisted log lines and user profiles were sent to OpenAI." %
+                       (triage["reviewed"], triage["submitted"], triage["flagged"], triage["unreviewed"]))
+    result = {"model": model, "model_name": MODEL_NAMES[model],
+              "mode": "heuristic" if model == "rules" else "trained",
+              "score_kind": "triaged" if triage else kind,
+              "detector_score_kind": kind, "review_threshold": threshold,
+              "review_threshold_note": "Default display cutoff; not a validated alarm boundary or target alert count.",
+              "notice": notice, "elapsed_ms": round((time.perf_counter() - start) * 1000, 2), "rows": rows}
+    if triage:
+        result.update(triage=triage, external=True)
+    if warning:
+        result["warning"] = warning
+    report_progress(progress, "results", "Analysis ready", len(rows), len(rows))
+    return result
 
 
 def sample_payload():
@@ -679,7 +738,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     static_routes = {"/": ("index.html", "text/html; charset=utf-8"),
                      "/index.html": ("index.html", "text/html; charset=utf-8"),
                      "/style.css": ("style.css", "text/css; charset=utf-8"),
-                     "/app.js": ("app.js", "application/javascript; charset=utf-8")}
+                     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
+                     "/review.js": ("review.js", "application/javascript; charset=utf-8"),
+                     "/charts.js": ("charts.js", "application/javascript; charset=utf-8"),
+                     "/investigation.js": ("investigation.js", "application/javascript; charset=utf-8"),
+                     "/model-lens.js": ("model-lens.js", "application/javascript; charset=utf-8")}
 
     def log_message(self, format, *args):
         # Uploaded content and user-controlled request targets are never logged.
@@ -779,7 +842,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def _begin_stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self._streaming = True
+
+    def _stream_event(self, event):
+        encoded = json.dumps(event, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        self.wfile.write(encoded + b"\n")
+        self.wfile.flush()
+
+    def _post_error(self, status, message):
+        if self._streaming:
+            self._stream_event({"type": "error", "error": message, "status": status})
+        else:
+            self._send(status, {"error": message})
+
     def do_POST(self):
+        self._streaming = False
         try:
             host = self._validate_host()
             self._validate_post_origin(host)
@@ -798,22 +882,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
             length = int(length_text)
             if self.headers.get_content_type() != "application/json":
                 raise APIError("Send the request as application/json.", 415)
+            wants_stream = any(part.split(";", 1)[0].strip().lower() == "application/x-ndjson"
+                               for part in self.headers.get("Accept", "").split(","))
+            progress = None
+            if wants_stream:
+                self._begin_stream()
+                progress = self._stream_event
             try:
-                raw = self.rfile.read(length)
-                if len(raw) != length:
-                    raise APIError("The request body is incomplete.")
+                report_progress(progress, "upload", "Receiving the log upload", 0, length)
+                chunks, received = [], 0
+                while received < length:
+                    chunk = self.rfile.read(min(256 * 1024, length - received))
+                    if not chunk:
+                        raise APIError("The request body is incomplete.")
+                    chunks.append(chunk)
+                    received += len(chunk)
+                    report_progress(progress, "upload", "Receiving the log upload", received, length)
+                raw = b"".join(chunks)
+                report_progress(progress, "parse", "Decoding the request body")
                 payload = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
                 raise APIError("The request body must be valid UTF-8 JSON.") from None
-            self._send(200, predict_payload(payload))
+            result = predict_payload(payload, progress=progress)
+            if self._streaming:
+                self._stream_event({"type": "result", "result": result})
+            else:
+                self._send(200, result)
         except APIError as error:
-            self._send(error.status, {"error": str(error)})
+            self._post_error(error.status, str(error))
         except (TimeoutError, socket.timeout):
-            self._send(408, {"error": "The upload timed out. Try a smaller file."})
+            self._post_error(408, "The upload timed out. Check the connection and try again.")
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception:
-            self._send(500, {"error": "Analysis could not complete. Check the input and try again."})
+            self._post_error(500, "Analysis could not complete. Check the input and try again.")
         finally:
             self.close_connection = True
 
