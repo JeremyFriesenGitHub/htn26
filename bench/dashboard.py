@@ -18,6 +18,7 @@ import ipaddress
 import json
 import math
 from pathlib import Path
+import random
 import re
 import socket
 import sys
@@ -35,6 +36,7 @@ from .model_store import model_store
 
 STORE = model_store()
 STATIC = ROOT / "dashboard"
+FINAL_REPORT = ROOT / "results" / "investigation" / "EVIDENCE_REPORT.html"
 MAX_LINE_BYTES = 16384
 MODEL_NAMES = {"rules": "Heuristic preview", "hybrid": "GMM + LLM triage",
                **{key: spec["name"] for key, spec in TRAINED_MODELS.items()}}
@@ -719,37 +721,152 @@ def predict_payload(payload, progress=None):
 
 
 def sample_payload():
-    """A deterministic synthetic week, unrelated to the benchmark dataset."""
+    """A deterministic miniature investigation with realistic background traffic.
+
+    The scenario deliberately includes useful comparison evidence. Requests arrive in
+    uneven work sessions, each account has a stable source address and resource pattern,
+    and the suspicious activity unfolds across several irregularly spaced episodes.
+    """
+    rng = random.Random(20260913)
     events = []
-    start = datetime(2026, 9, 13, 8, tzinfo=timezone(timedelta(hours=-4)))
-    users = ("alex_chen", "maya_patel", "noah_wilson", "sarah_j", "david_m", "emma_lee")
-    routes = ("/dashboard", "/api/projects", "/intranet/forum/view/1042", "/assets/app.css",
-              "/api/team", "/reports/weekly", "/api/notifications", "/profile")
-    for day in range(7):
-        for i in range(40):
-            timestamp = start + timedelta(days=day, minutes=i * 16 + (i % 3))
-            user = users[(i + day) % len(users)]
-            ip = "10.0.%d.%d" % (2 + (i % 3), 10 + (i + day) % len(users))
-            path = routes[(i * 3 + day) % len(routes)]
-            status = 404 if i == 19 else 403 if i == 33 else 200
-            method = "GET"
-            if i == 8:
-                method, path, status = "POST", "/api/auth/login", 401
-            size = 384 + ((i * 1543 + day * 709) % 32000)
-            events.append((timestamp, ip, user, method, path, status, size))
-    attack = start + timedelta(days=5, hours=14, minutes=13)
-    for i in range(7):
-        events.append((attack + timedelta(seconds=i * 7), "198.51.100.42", "sarah_j",
-                       "POST", "/api/auth/login", 401, 280))
-    events.extend([
-        (attack + timedelta(seconds=50), "198.51.100.42", "sarah_j", "POST", "/api/auth/login", 200, 540),
-        (attack + timedelta(seconds=54), "198.51.100.42", "sarah_j", "POST", "/api/admin/role_update", 200, 680),
-        (attack + timedelta(seconds=57), "198.51.100.42", "sarah_j", "GET", "/finance/export_CONFIDENTIAL.zip", 200, 18574320),
-        (start + timedelta(days=3, hours=4), "203.0.113.18", "-", "GET", "/api/search?q=1%27+OR+%271%27=%271", 400, 180),
-        (start + timedelta(days=3, hours=4, minutes=2), "203.0.113.18", "-", "GET", "/files?name=../../etc/passwd", 403, 240),
-        (start + timedelta(days=4, hours=5), "10.0.3.12", "maya_patel", "POST", "/api/admin/permissions", 200, 870),
-        (start + timedelta(days=6, hours=1), "10.0.2.10", "alex_chen", "GET", "/reports/weekly.zip", 200, 7340032),
-    ])
+    zone = timezone(timedelta(hours=-4))
+    start = datetime(2026, 9, 7, tzinfo=zone)
+    profiles = {
+        "amanda_l": ("10.0.8.22", ("/it/scripts/backup.sh", "/it/network_map.pdf")),
+        "ashley_k": ("10.0.7.11", ("/sales/leads_raw.csv", "/sales/targets_q1.xlsx")),
+        "chris_b": ("10.0.6.34", ("/marketing/brand_guide.pdf", "/marketing/assets/campaign_q1.zip")),
+        "david_m": ("10.0.8.45", ("/finance/reports/public_summary.pdf", "/finance/templates/expense.docx")),
+        "jessica_w": ("10.0.6.21", ("/marketing/brand_guide.pdf", "/marketing/assets/campaign_q1.zip")),
+        "joshua_c": ("10.0.8.50", ("/eng/architecture_v2.pdf", "/eng/api_docs.html")),
+        "matthew_r": ("10.0.7.15", ("/sales/leads_raw.csv", "/sales/targets_q1.xlsx")),
+        "michael_t": ("10.0.5.88", ("/hr/directory_full_CONFIDENTIAL.csv", "/hr/policies_2026.pdf")),
+        "nicole_h": ("10.0.9.05", ("/exec/board_deck.pptx", "/finance/reports/q1_draft_CONFIDENTIAL.zip")),
+        "sarah_j": ("10.0.5.12", ("/finance/reports/q1_draft_CONFIDENTIAL.zip", "/finance/reports/budget_v2_CONFIDENTIAL.xlsx")),
+    }
+    common = ("/dashboard", "/api/notifications/poll", "/assets/app.js", "/assets/style.css")
+    forum_ids = (1038, 1040, 1042, 1046, 1051)
+    forum_topics = ("holiday_social", "q1_updates", "lunch_menu", "parking_issues",
+                    "policy_changes", "welcome_new_hires")
+
+    def add(timestamp, ip, user, method, path, status, size):
+        events.append((timestamp, ip, user, method, path, status, size))
+
+    def response_size(path, status):
+        if status >= 400:
+            return 245 if status == 403 else 188 + rng.randrange(90)
+        if path.endswith("q1_draft_CONFIDENTIAL.zip"):
+            return 8459200
+        if path.endswith((".zip", ".csv", ".xlsx", ".pptx", ".pdf", ".docx", ".sh")):
+            return 48000 + rng.randrange(420000)
+        if path == "/assets/app.js":
+            return 4500 + rng.randrange(101)
+        if path == "/assets/style.css":
+            return 3100 + rng.randrange(101)
+        if path == "/dashboard":
+            return 2000 + rng.randrange(101)
+        return 220 + rng.randrange(7800)
+
+    # Ten days of ordinary traffic provide account, source, endpoint and status history.
+    for day in range(10):
+        for user_index, (user, (ip, resources)) in enumerate(profiles.items()):
+            first = start + timedelta(days=day, hours=8, minutes=5 + rng.randrange(105),
+                                      seconds=rng.randrange(60))
+            if (day * 3 + user_index) % 17 == 0:
+                add(first, ip, user, "POST", "/api/auth/login", 401, response_size("/api/auth/login", 401))
+                first += timedelta(seconds=73 + rng.randrange(95))
+            add(first, ip, user, "POST", "/api/auth/login", 200, response_size("/api/auth/login", 200))
+
+            when = first
+            request_count = 12 + rng.randrange(11)
+            for request_index in range(request_count):
+                # Most requests cluster into work sessions; occasional longer gaps keep
+                # the sample from looking mechanically generated.
+                gap = min(840, 8 + int(rng.expovariate(1 / 105)))
+                if request_index in (6, 14):
+                    gap += 900 + rng.randrange(2400)
+                when += timedelta(seconds=gap)
+                choice = rng.randrange(12)
+                method, status = "GET", 200
+                if choice < 4:
+                    path = common[choice]
+                elif choice < 7:
+                    path = resources[(choice + day + user_index) % len(resources)]
+                elif choice < 10:
+                    path = "/intranet/forum/view/%d" % rng.choice(forum_ids)
+                elif choice == 10:
+                    method, path, status = "POST", "/api/metrics/report", 200
+                else:
+                    method = "POST"
+                    path = ("/intranet/forum/edit/%d" % rng.choice(forum_ids)
+                            if request_index % 2 else
+                            "/intranet/forum/new?topic=%s" % rng.choice(forum_topics))
+                    status = 302
+                add(when, ip, user, method, path, status, response_size(path, status))
+            when += timedelta(seconds=50 + rng.randrange(400))
+            add(when, ip, user, "GET", "/logout", 302, 320)
+
+    # Earlier denied requests make the later change in archive access directly
+    # inspectable from this upload.
+    for day, hour, minute in ((1, 10, 41), (4, 15, 3), (7, 9, 19)):
+        when = start + timedelta(days=day, hours=hour, minutes=minute, seconds=rng.randrange(60))
+        add(when, "10.0.8.45", "david_m", "GET",
+            "/finance/reports/q1_draft_CONFIDENTIAL.zip", 403, 245)
+
+    # A separate external probe gives the dashboard a short, source-linked case.
+    scan = start + timedelta(days=5, hours=3, minutes=17)
+    add(scan, "203.0.113.18", "-", "GET", "/api/search?q=1%27+OR+%271%27=%271", 400, 188)
+    add(scan + timedelta(seconds=11), "203.0.113.18", "-", "GET", "/assets/app.js", 200, 4550)
+    add(scan + timedelta(seconds=37), "203.0.113.18", "-", "GET", "/files?name=../../etc/passwd", 403, 245)
+    add(scan + timedelta(minutes=3, seconds=8), "203.0.113.18", "-", "GET", "/api/internal/debug/dump", 404, 212)
+
+    # The principal incident is intentionally uneven. It supports an analyst story
+    # spanning credential attempts, exploit development, a privileged action and
+    # changed access to a previously denied resource.
+    first_burst = start + timedelta(days=6, hours=23, minutes=10, seconds=19)
+    for seconds in (0, 6, 9, 13):
+        add(first_burst + timedelta(seconds=seconds), "10.0.8.45", "sarah_j",
+            "POST", "/api/auth/login", 401, 88)
+
+    second_burst = start + timedelta(days=7, hours=22, minutes=11, seconds=26)
+    for seconds in (0, 4, 6, 9, 11, 13):
+        add(second_burst + timedelta(seconds=seconds), "10.0.8.45", "sarah_j",
+            "POST", "/api/auth/login", 401, 88)
+
+    incident_day = start + timedelta(days=8)
+    add(incident_day + timedelta(hours=9, minutes=20, seconds=20), "10.0.8.45", "david_m",
+        "POST", "/intranet/forum/new?topic=lunch_menu&payload=csrf_test", 500, 1024)
+    add(incident_day + timedelta(hours=9, minutes=42, seconds=35), "10.0.8.45", "david_m",
+        "POST", "/intranet/forum/new?topic=q1_updates&action=csrf_role_update", 400, 612)
+    add(incident_day + timedelta(hours=10, minutes=18, seconds=52), "10.0.8.45", "david_m",
+        "POST", "/intranet/forum/new?topic=parking_issues&script=success", 302, 491)
+
+    role_change = incident_day + timedelta(hours=11, minutes=7, seconds=57)
+    add(role_change - timedelta(seconds=19), "10.0.5.12", "sarah_j",
+        "GET", "/intranet/forum/view/1042", 200, 5360)
+    add(role_change, "10.0.5.12", "sarah_j", "POST", "/api/admin/role_update", 200, 680)
+    add(role_change + timedelta(seconds=2), "10.0.5.12", "sarah_j",
+        "GET", "/assets/avatar_1042.png", 200, 18320)
+
+    archive = incident_day + timedelta(hours=11, minutes=26, seconds=59)
+    add(archive - timedelta(minutes=2, seconds=14), "10.0.8.45", "david_m",
+        "GET", "/finance/reports/public_summary.pdf", 200, 154200)
+    add(archive, "10.0.8.45", "david_m", "GET",
+        "/finance/reports/q1_draft_CONFIDENTIAL.zip", 200, 8459200)
+    add(archive + timedelta(seconds=43), "10.0.8.45", "david_m",
+        "GET", "/api/notifications/poll", 200, 282)
+    add(incident_day + timedelta(hours=11, minutes=48, seconds=1), "10.0.8.45", "david_m",
+        "POST", "/intranet/forum/edit/1042", 302, 424)
+
+    takeover = incident_day + timedelta(hours=22, minutes=29, seconds=43)
+    add(takeover, "10.0.8.45", "sarah_j", "POST", "/api/auth/login", 200, 128)
+    add(takeover + timedelta(seconds=2), "10.0.8.45", "sarah_j", "GET", "/dashboard", 200, 2040)
+    add(takeover + timedelta(seconds=17), "10.0.8.45", "sarah_j",
+        "GET", "/api/notifications/poll", 200, 264)
+    add(takeover + timedelta(seconds=57), "10.0.8.45", "sarah_j", "GET",
+        "/finance/reports/q1_draft_CONFIDENTIAL.zip", 200, 8459200)
+    add(takeover + timedelta(minutes=3, seconds=57), "10.0.8.45", "sarah_j",
+        "GET", "/logout", 302, 320)
+
     lines = []
     months = tuple(MONTHS)
     for timestamp, ip, user, method, path, status, size in sorted(events):
@@ -852,8 +969,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, model_status())
             elif path == "/api/sample":
                 self._send(200, sample_payload())
-            elif path in self.static_routes:
-                filename, mime = self.static_routes[path]
+            elif path.rstrip("/") == "/final_htn26_report":
+                try:
+                    body = FINAL_REPORT.read_bytes()
+                except OSError:
+                    raise APIError("The final investigation report is missing from this checkout.", 503) from None
+                self._send(200, body, "text/html; charset=utf-8")
+            elif path in self.static_routes or path.rstrip("/") in ("/analyze", "/models", "/investigations") or re.fullmatch(r"/investigations/[a-zA-Z0-9_:.-]+/?", path):
+                filename, mime = self.static_routes.get(path, ("index.html", "text/html; charset=utf-8"))
                 try:
                     body = (STATIC / filename).read_bytes()
                 except OSError:

@@ -266,18 +266,21 @@
     const rough = highest / 4, magnitude = Math.pow(10, Math.floor(Math.log10(rough))), tickStep = Math.max(1, Math.ceil(rough / magnitude) * magnitude), max = tickStep * 4;
     const svg = svgElement("svg", {viewBox: `0 0 ${width} ${height}`, class: "log-chart-svg log-activity-svg", role: "group", "aria-label": "Request counts over time. Focus the chart and use arrow keys to move between time buckets. Activate for exact counts."});
     svgText(svg, left, 15, options.showAll ? "Requests" : "Candidates");
+    const yLabels=[];
     for (let index = 0; index <= 4; index++) {
       const y = top + plotHeight * (1 - index / 4);
       svg.append(svgElement("line", {x1: left, x2: width - right, y1: y, y2: y, class: "log-chart-grid"}));
-      svgText(svg, left - 8, y + 4, shortNumber(max * index / 4), "end");
+      yLabels.push(svgText(svg, left - 8, y + 4, shortNumber(max * index / 4), "end"));
     }
     const slot = plotWidth / data.buckets.length;
+    const bars = [];
     data.buckets.forEach((bucket, index) => {
       const x = left + slot * index, barWidth = Math.max(2, Math.min(slot * .68, 44)), barX = x + (slot - barWidth) / 2;
       const totalHeight = (options.showAll ? bucket.count : bucket.flagged) / max * plotHeight, flaggedHeight = bucket.flagged / max * plotHeight;
       const belowHeight = options.showAll ? (bucket.count - bucket.flagged) / max * plotHeight : 0;
-      svg.append(svgElement("rect", {x: barX, y: top + plotHeight - belowHeight, width: barWidth, height: belowHeight, class: "log-chart-bar total"}));
-      svg.append(svgElement("rect", {x: barX, y: top + plotHeight - totalHeight, width: barWidth, height: flaggedHeight, class: "log-chart-bar flagged"}));
+      const totalBar=svgElement("rect", {x: barX, y: top + plotHeight - belowHeight, width: barWidth, height: belowHeight, class: "log-chart-bar total"});
+      const flaggedBar=svgElement("rect", {x: barX, y: top + plotHeight - totalHeight, width: barWidth, height: flaggedHeight, class: "log-chart-bar flagged"});
+      svg.append(totalBar,flaggedBar); bars.push({totalBar,flaggedBar});
       svg.append(svgElement("rect", {x, y: top, width: slot, height: plotHeight, tabindex: index === 0 ? "0" : "-1", role: "button", class: "log-chart-bucket-hit", "data-chart-mark": index, "aria-label": `${utc(bucket.start)} to ${utc(bucket.end)}: ${number(bucket.count)} requests, ${number(bucket.flagged)} review candidates, ${number(bucket.users.size)} accounts. Activate for details.`}));
     });
     const ticks = width < 450 ? 2 : 4;
@@ -288,7 +291,42 @@
     svgText(svg, width - right, height - 3, "Time (UTC)", "end");
     host.append(svg); if (options.showAll) legend(host, "activity"); bindMarks(state, svg, data.buckets);
     const interval = `${data.multiplier === 1 ? "" : data.multiplier + "-"}${data.unit === DAY ? "day" : "hour"}`;
-    return {axisLabel: "Requests", caption: `${options.showAll ? "All requests" : "Review candidates"} per ${interval}. Select a bar to view its requests.${!data.buckets.some((bucket) => bucket.flagged) ? " No candidates at this cutoff." : ""}`};
+    // Index each bucket once. Dragging then uses binary search, not a scan of every request.
+    const scoreIndex = options.thresholdPreview ? data.buckets.map(()=>[]) : null;
+    if(scoreIndex) {
+      for(const row of options.rows||[]) {
+        const time=timeOf(row);if(!Number.isFinite(time)||!Number.isFinite(row.score))continue;
+        const index=Math.min(data.buckets.length-1,Math.floor((time-data.start)/data.step));
+        scoreIndex[index].push(row.score);
+      }
+      for(const scores of scoreIndex)scores.sort((a,b)=>a-b);
+    }
+    const marks=Array.from(svg.querySelectorAll("[data-chart-mark]"));
+    return {axisLabel: "Requests", caption: `${options.showAll ? "All requests" : "Review candidates"} per ${interval}. Select a bar to view its requests.${!data.buckets.some((bucket) => bucket.flagged) ? " No candidates at this cutoff." : ""}`,
+      updateThreshold(cutoff) {
+        if(!scoreIndex)return;
+        let highest=1,totalCandidates=0;
+        scoreIndex.forEach((scores,index)=>{
+          let low=0,high=scores.length;
+          while(low<high){const mid=(low+high)>>>1;if(scores[mid]<cutoff)low=mid+1;else high=mid;}
+          const bucket=data.buckets[index];bucket.flagged=scores.length-low;
+          totalCandidates+=bucket.flagged;highest=Math.max(highest,options.showAll?bucket.count:bucket.flagged);
+        });
+        const rough=highest/4,magnitude=Math.pow(10,Math.floor(Math.log10(rough)));
+        const max=Math.max(1,Math.ceil(rough/magnitude)*magnitude)*4;
+        yLabels.forEach((node,index)=>{node.textContent=shortNumber(max*index/4);});
+        data.buckets.forEach((bucket,index)=>{
+          const {totalBar,flaggedBar}=bars[index];
+          const below=options.showAll?(bucket.count-bucket.flagged)/max*plotHeight:0;
+          const flagged=bucket.flagged/max*plotHeight;
+          totalBar.setAttribute("y",top+plotHeight-below);totalBar.setAttribute("height",below);
+          flaggedBar.setAttribute("y",top+plotHeight-below-flagged);flaggedBar.setAttribute("height",flagged);
+          marks[index].setAttribute("aria-label",`${utc(bucket.start)} to ${utc(bucket.end)}: ${number(bucket.flagged)} review candidates. Activate for details.`);
+        });
+        if(state.active)fillTooltip(state,state.active);
+        return totalCandidates;
+      }
+    };
   }
   function renderTimeline(host, options = {}) {
     const state = setup(host, options, "timeline"), rows = options.rows || [];

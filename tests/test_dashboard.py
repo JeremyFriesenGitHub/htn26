@@ -144,16 +144,23 @@ class RulesTests(unittest.TestCase):
     def test_sample_is_deterministic_varied_and_scores_sorted(self):
         sample = dashboard.sample_payload()
         self.assertEqual(sample, dashboard.sample_payload())
-        result = dashboard.predict_payload({"logs": sample["logs"], "model": "rules"})
-        rows = result["rows"]
-        self.assertTrue(220 <= len(rows) <= 400)
-        self.assertGreater(len({r["timestamp"][:10] for r in rows}), 3)
+        records = dashboard.parse_logs(sample["logs"])
+        rows = dashboard.score_rules(records)
+        self.assertTrue(1500 <= len(rows) <= 2500)
+        self.assertGreater(len({r["timestamp"][:10] for r in rows}), 8)
+        ordered = sorted(record.timestamp for record in records)
+        gaps = {(right - left).total_seconds() for left, right in zip(ordered, ordered[1:])}
+        self.assertGreater(len(gaps), 100)
         self.assertEqual([r["score"] for r in rows], sorted([r["score"] for r in rows], reverse=True))
         self.assertTrue(any(r["score"] >= .75 for r in rows))
+        self.assertTrue(any(.25 <= r["score"] < .75 for r in rows))
         self.assertTrue(any(r["score"] < .25 for r in rows))
-        self.assertEqual(result["mode"], "heuristic")
-        self.assertEqual(result["score_kind"], "heuristic")
-        self.assertIn("no learned", result["notice"])
+        archive = [r for r in rows if r["user"] == "david_m" and
+                   r["path"] == "/finance/reports/q1_draft_CONFIDENTIAL.zip"]
+        self.assertEqual({r["status"] for r in archive}, {200, 403})
+        self.assertEqual({r["ip"] for r in rows if r["user"] == "sarah_j"}, {"10.0.5.12", "10.0.8.45"})
+        forum_probe = [r for r in rows if r["path"].startswith("/intranet/forum/new?")]
+        self.assertEqual({r["status"] for r in forum_probe}, {302, 400, 500})
 
 
 class ModelTests(unittest.TestCase):

@@ -10,11 +10,14 @@ const output = new URL("../.vercel/output/", import.meta.url);
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 await cp(new URL("../dashboard/", import.meta.url), new URL("static/", output), { recursive: true });
+await cp(new URL("../results/investigation/EVIDENCE_REPORT.html", import.meta.url), new URL("static/final_htn26_report.html", output));
 await writeFile(new URL("config.json", output), JSON.stringify({
   version: 3,
   routes: [
     { src: "/api/(.*)", dest: `${backend.origin}/api/$1` },
-    { handle: "filesystem" }
+    { src: "/final_htn26_report/?", dest: "/final_htn26_report.html" },
+    { handle: "filesystem" },
+    { src: "/(?:analyze|models|investigations(?:/[a-zA-Z0-9_:.-]+)?)/?", dest: "/index.html" }
   ]
 }, null, 2));
 console.log("Built dashboard and Railway API proxy.");
