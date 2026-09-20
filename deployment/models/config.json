@@ -1,0 +1,27 @@
+{
+  "gmm": {
+    "k": 4,
+    "cov": "diag"
+  },
+  "gmm_val_prauc": 1.0,
+  "ae": {
+    "hidden": [
+      128,
+      64
+    ],
+    "latent": 8,
+    "dropout": 0.15
+  },
+  "ae_val_prauc": 0.9970322323132482,
+  "inject_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "target_alerts_frac": 0.005,
+  "device": "cuda",
+  "n_test": 22982,
+  "n_attacks": 22
+}

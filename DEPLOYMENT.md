@@ -16,29 +16,17 @@ through Flask/Gunicorn for hosting. `python -m bench.dashboard` remains the loca
    `railway.json`; leave the start-command override empty.
 2. Generate a public domain under Networking. `/api/health` should return
    `{"status":"ok"}`. The container binds to `0.0.0.0:$PORT` automatically.
-3. Attach a persistent volume mounted at **`/models`** and set **`MODEL_STORE=/models`**.
-4. Upload the contents of local `results/model_store/` into the volume root.
-   These files are gitignored and are deliberately excluded from the Docker image.
-   With the Railway CLI linked to the correct project, environment, and service:
-
-   ```bash
-   railway volume browse /
-   ```
-
-   Or upload the existing artifacts individually:
-
-   ```bash
-   for file in results/model_store/*; do
-     railway volume files upload "$file" "/$(basename "$file")"
-   done
-   ```
-
-   See Railway's [volume file documentation](https://docs.railway.com/volumes).
-   Keep the files directly under `/models`, not `/models/model_store`.
-5. Restart the backend after uploading or replacing models to clear cached
-   calibration and profiles. Check `/api/status` for available models.
-6. Optionally set **`OPENAI_API_KEY`** on Railway to enable hybrid triage. Never
+3. The trained models are bundled in `deployment/models/` and copied into the
+   Docker image automatically. No volume or model upload is required.
+4. Check `/api/status`: GMM and Deep AE should be available.
+5. Optionally set **`OPENAI_API_KEY`** on Railway to enable hybrid triage. Never
    put that key in Vercel's frontend or commit `.keys.env`.
+
+For custom models, mount a volume at `/models`, set `MODEL_STORE=/models`, and
+upload a complete replacement model store. Restart after replacing files.
+An empty volume falls back to the bundled models. A volume containing any model
+artifact is authoritative; incomplete custom stores are not mixed with the bundle.
+Local trained files in `results/model_store/` likewise take precedence by default.
 
 Required artifacts:
 
@@ -52,7 +40,7 @@ The calibration files preserve training-baseline scores without shipping raw
 training logs. Without them, scoring falls back to percentiles within the upload.
 The profiles file supplies learned permission context for LLM triage. Copy only
 your own trusted model artifacts: Python pickle files contain executable data.
-Without artifacts, the server still starts and heuristic preview works.
+The bundled artifacts include calibration and profiles, so raw training logs are not needed.
 
 The image uses Python 3.13 and matching numerical-library versions from this
 checkout, with CPU PyTorch (no GPU required). It does not train models on startup.

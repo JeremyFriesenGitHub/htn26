@@ -3,3 +3,8 @@
 !requirements-serve.txt
 !bench/
 !bench/*.py
+!deployment/
+!deployment/models/
+!deployment/models/*.pkl
+!deployment/models/*.pt
+!deployment/models/*.json
