@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f7f8fa">
-  <title>Log review</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='8' fill='%23232b38'/%3E%3Cpath d='M10 12h20M10 20h14M10 28h20' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
+  <title>Trace · Log investigations</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='11' fill='%23242e2b'/%3E%3Cpath d='M10 12h20M20 12v16h10' fill='none' stroke='%23b5eccb' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='10' cy='12' r='3' fill='%23b5eccb'/%3E%3Ccircle cx='30' cy='28' r='3' fill='%23b5eccb'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
   <script src="/review.js" defer></script>
   <script src="/charts.js" defer></script>
@@ -15,12 +15,24 @@
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
-  <header class="app-header"><div class="header-inner"><h1><span data-icon="logs"></span>Log review</h1><span id="connection" class="connection">Connecting to local server…</span></div></header>
+  <header class="app-header">
+    <div class="header-inner">
+      <button class="brand" id="trace-home" aria-label="Trace — analyze logs"><svg class="trace-mark" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="11"/><path d="M10 12h20M20 12v16h10"/><circle cx="10" cy="12" r="3"/><circle cx="30" cy="28" r="3"/></svg><span>trace<span class="brand-dot">.</span></span></button>
+      <nav class="primary-nav" aria-label="Main navigation">
+        <button class="nav-link" data-view="analyze" aria-current="page">Analyze</button>
+        <button class="nav-link" data-view="investigations">Investigations</button>
+        <button class="nav-link" data-view="models">Models</button>
+      </nav>
+      <div class="header-actions"><span id="connection" class="connection" role="status">Connecting…</span><button id="load-session" class="button secondary">Open investigation</button></div>
+    </div>
+  </header>
   <main id="main">
-    <div class="export-actions"><button id="load-session" class="button secondary">Open saved investigation</button><input id="session-file" type="file" accept=".json,.json.gz,.gz,application/json,application/gzip" hidden></div>
+    <input id="session-file" type="file" accept=".json,.json.gz,.gz,application/json,application/gzip" hidden>
+    <section id="investigations-empty" class="panel nav-empty" aria-labelledby="empty-title" hidden><span class="eyebrow">Your workspace</span><h2 id="empty-title">Every investigation starts with a trace.</h2><p>Analyze a log file to explore related requests, reconstruct events, and keep notes. You can also open a saved investigation above.</p><button class="button primary" id="empty-analyze">Analyze logs <span aria-hidden="true">→</span></button></section>
+    <section id="models-panel" aria-labelledby="models-title" hidden><div class="page-intro"><span class="eyebrow">Detection</span><h2 id="models-title">Find the right perspective.</h2><p>Explore the detectors available on this server. Each looks for unusual activity in a different way.</p></div><div id="model-catalog" class="model-catalog"><p>Checking available models…</p></div></section>
     <div id="page-error" class="error-message" role="alert" hidden></div>
     <section id="input-panel" class="panel input-panel" aria-labelledby="input-title">
-      <div class="panel-heading"><div><h2 id="input-title">Analyze access logs</h2><p>Upload an Apache log file or paste requests to find unusual activity.</p></div><button id="load-sample" class="button secondary">Try sample logs</button></div>
+      <div class="panel-heading"><div><span class="eyebrow">Start an investigation</span><h2 id="input-title">Follow the trace.</h2><p>Upload an Apache log file or paste requests to find unusual activity.</p></div><button id="load-sample" class="button secondary">Try sample logs</button></div>
       <div class="input-tabs" role="group" aria-label="Log input method"><button id="tab-file" class="tab active" aria-pressed="true">Upload a file</button><button id="tab-paste" class="tab" aria-pressed="false">Paste logs</button></div>
       <form id="analyze-form">
         <div id="file-input-panel">
@@ -35,7 +47,7 @@
         <div id="analyze-error" class="error-message" role="alert" hidden></div>
         <div id="processing-progress" class="processing-progress" hidden><div class="progress-heading"><strong id="progress-stage">Preparing analysis</strong><span id="progress-count"></span></div><progress id="progress-bar" max="100" aria-label="Analysis progress"></progress><p id="progress-message" role="status" aria-live="polite"></p></div>
       </form>
-      <div class="input-footer"><span id="privacy-note">Processed on this computer. No external API calls.</span> <button class="text-button" id="cancel-input" hidden>Return to results</button></div>
+      <div class="input-footer"><span id="privacy-note">Processed on the analysis server. No external AI calls.</span> <button class="text-button" id="cancel-input" hidden>Return to results</button></div>
     </section>
     <section id="results-panel" aria-labelledby="results-title" hidden>
       <div class="results-heading">

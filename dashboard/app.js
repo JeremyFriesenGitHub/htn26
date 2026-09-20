@@ -34,7 +34,7 @@ const scoreKindFor = (run,row) => run.score_kind === "triaged" ? (Number.isFinit
 async function api(path, options = {}) {
   let response;
   try { response = await fetch(path, options); }
-  catch { throw new Error("The local server could not be reached. Start it with python3 -m bench.dashboard and try again."); }
+  catch { throw new Error("The analysis server could not be reached. Please try again."); }
   let body;
   try { body = await response.json(); }
   catch { throw new Error("The server returned an unreadable response. Please try again."); }
@@ -59,11 +59,11 @@ function updateProgress(event) {
   $("processing-progress").hidden = false;
 }
 async function predictStream(logs, model, report = updateProgress) {
-  report({stage:"upload",message:"Sending the log file to the local server."});
+  report({stage:"upload",message:"Sending logs to the analysis server."});
   await new Promise((resolve) => setTimeout(resolve, 0));
   let response;
   try { response = await fetch("/api/predict", {method:"POST",headers:{"Content-Type":"application/json","Accept":"application/x-ndjson"},body:JSON.stringify({logs,model})}); }
-  catch { throw new Error("The local server could not be reached. Restart it and try again."); }
+  catch { throw new Error("The analysis server could not be reached. Please try again."); }
   if (!response.headers.get("Content-Type")?.includes("application/x-ndjson")) {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || `Analysis failed (${response.status}).`);
@@ -117,11 +117,47 @@ function switchInput(mode) {
   }
   showError("analyze-error"); syncControls();
 }
+function setView(view) {
+  for (const button of document.querySelectorAll("[data-view]")) {
+    if (button.dataset.view === view) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+  $("models-panel").hidden = view !== "models";
+  $("investigations-empty").hidden = view !== "investigations" || Boolean(state.run);
+  document.title = `Trace · ${{analyze:"Analyze logs",investigations:"Investigations",models:"Models"}[view]}`;
+}
+function navigate(view) {
+  if (state.busy || state.reading || state.modelBusy) { toast("Let the current analysis finish before switching views."); return; }
+  if (view === "analyze") showInput();
+  else if (view === "investigations") {
+    setView(view);
+    $("input-panel").hidden = true;
+    $("results-panel").hidden = !state.run;
+    if (state.run) { state.caseId = null; state.selection = null; renderOverview(); }
+  } else {
+    setView("models");
+    $("input-panel").hidden = true;
+    $("results-panel").hidden = true;
+    renderModelCatalog();
+  }
+}
+function renderModelCatalog() {
+  $("model-catalog").innerHTML = state.models.length ? state.models.map((model) => `<article class="panel model-card"><div class="model-card-heading"><h3>${escapeHTML(model.name)}</h3><span class="model-availability ${model.available ? "available" : ""}">${model.available ? "Available" : "Unavailable"}</span></div><p>${escapeHTML(model.available ? model.detail : "This detector is not enabled on this server.")}</p><button class="button secondary" data-use-model="${escapeHTML(model.id)}" ${model.available ? "" : "disabled"}>${model.available ? "Use this model →" : "Not configured"}</button></article>`).join("") : "<p>Model information is unavailable. Check the server connection.</p>";
+}
+for (const button of document.querySelectorAll("[data-view]")) button.addEventListener("click", () => navigate(button.dataset.view));
+$("trace-home").addEventListener("click", () => navigate("analyze"));
+$("empty-analyze").addEventListener("click", () => navigate("analyze"));
+$("model-catalog").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-use-model]");
+  if (!button || button.disabled || state.busy || state.reading || state.modelBusy) return;
+  navigate("analyze"); $("model-select").value = button.dataset.useModel; modelHelp(); $("model-select").focus();
+});
 function showInput() {
+  setView("analyze");
   $("input-panel").hidden = false; $("results-panel").hidden = true;
   $("cancel-input").hidden = !state.run;
 }
-function showResults() { $("input-panel").hidden = true; $("results-panel").hidden = false; if(state.run) { if(state.caseId)renderWorkspace(); else renderOverview(); } }
+function showResults() { setView("investigations"); $("input-panel").hidden = true; $("results-panel").hidden = false; if(state.run) { if(state.caseId)renderWorkspace(); else renderOverview(); } }
 function fileSize(bytes) { return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
 function lineCount(logs) { return logs.split("\n").reduce((total, line) => total + (line.trim() ? 1 : 0), 0); }
 function renderFile() {
@@ -150,16 +186,16 @@ function modelHelp() {
   const model = state.models.find((item) => item.id === $("model-select").value);
   const privacy = $("privacy-note");
   if (privacy) privacy.textContent = model?.id === "hybrid"
-    ? "LLM triage sends the detector's top matches to OpenAI. Everything else stays on this computer."
-    : "Processed on this computer. No external API calls.";
-  if (model?.id === "hybrid") { $("model-help").textContent = "The GMM ranks every line on this machine, then only its top slice is sent to OpenAI for review with each user\u2019s normal-access profile. This is the only option that sends data off this computer."; return; }
+    ? "LLM triage sends the detector's top matches to OpenAI. Other requests stay on the analysis server."
+    : "Processed on the analysis server. No external AI calls.";
+  if (model?.id === "hybrid") { $("model-help").textContent = "The GMM ranks every line on the analysis server, then only its top slice is sent to OpenAI for review with each user\u2019s normal-access profile. This is the only option that sends log data to an external AI service."; return; }
   $("model-help").textContent = model?.id === "rules" ? "Fixed rules score request fields and recent request patterns. No trained model or learned account baseline is used." : model ? "Ranks requests using the saved model. Results show the raw anomaly score and its training-baseline percentile separately; neither is attack confidence." : "No model information available.";
 }
 function renderModels() {
   $("model-select").innerHTML = state.models.map((model) => `<option value="${escapeHTML(model.id)}" ${model.available ? "" : "disabled"}>${escapeHTML(model.id === "rules" ? "Preview rules" : model.name)}${model.available ? "" : " — unavailable"}</option>`).join("");
   $("model-select").value = state.models.find((model) => model.available && model.id !== "rules")?.id || "rules";
   $("model-setup").hidden = state.models.every((model) => model.available);
-  modelHelp();
+  modelHelp(); renderModelCatalog();
 }
 async function prepareRun(run) {
   for (let i=0;i<run.rows.length;i++) {
@@ -420,7 +456,7 @@ function sessionSnapshot(){
     query:state.query,account:state.account,includeContext:state.includeContext};
 }
 async function restoreSession(saved){
-  if(saved?.schema!=="log-order-investigation"||saved.version!==1||!Array.isArray(saved.rows)||!saved.rows.length||!Array.isArray(saved.runs)||!saved.runs.length)throw new Error("Choose a Log & Order investigation save (version 1).");
+  if(saved?.schema!=="log-order-investigation"||saved.version!==1||!Array.isArray(saved.rows)||!saved.rows.length||!Array.isArray(saved.runs)||!saved.runs.length)throw new Error("Choose a Trace investigation save (version 1).");
   const ids=new Set();
   for(const row of saved.rows){
     if(!Number.isSafeInteger(row.id)||ids.has(row.id)||!Number.isFinite(Date.parse(row.timestamp))||typeof row.raw!=="string"||!Number.isFinite(row.status))throw new Error("The saved investigation contains invalid or duplicate records.");
@@ -615,8 +651,8 @@ $("save-session").addEventListener("click",async()=>{
     const json=JSON.stringify(sessionSnapshot());
     if(typeof CompressionStream!=="undefined"){
       const compressed=await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"))).blob();
-      saveFile("log-order-investigation.json.gz",compressed,"application/gzip");
-    }else saveFile("log-order-investigation.json",json,"application/json;charset=utf-8");
+      saveFile("trace-investigation.json.gz",compressed,"application/gzip");
+    }else saveFile("trace-investigation.json",json,"application/json;charset=utf-8");
     toast("Saved all model results, timeline edits, and original records.");
   }catch(error){showError("page-error",`Could not save investigation: ${error.message}`);}
   finally{button.disabled=false;button.textContent="Save investigation data";}
@@ -639,6 +675,6 @@ $("export-investigation").addEventListener("click",exportReport);
 $("export-investigation-csv").addEventListener("click",exportRawCSV);
 window.addEventListener("resize",()=>{clearTimeout(state.resizeTimer);state.resizeTimer=setTimeout(()=>{if(state.run&&!$("results-panel").hidden){if(state.caseId)renderModelEvidence();else renderOverview();}},150);});
 (async()=>{
-  try{const status=await api("/api/status");state.models=status.models;for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Local server · trained models available":"Local server · rules available";syncControls();}
+  try{const status=await api("/api/status");state.models=status.models;for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});state.ready=true;renderModels();$("connection").textContent=state.models.some((model)=>model.available&&model.id!=="rules")?"Models online":"Rules online";syncControls();}
   catch(error){$("connection").textContent="Server unavailable";showError("page-error",error.message);}
 })();
