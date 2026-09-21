@@ -24,7 +24,7 @@ const state = {
   run:null,source:"",synthetic:false,threshold:1,logs:"",rowsById:new Map(),
   runs:new Map(),activeModel:"",modelBusy:false,investigations:[],caseId:null,
   selection:null,edits:new Map(),dispositions:new Map(),eventNotes:new Map(),
-  query:"",account:"",overviewPage:1,timelineLimit:40,earlierLimit:12,relatedLimit:12,includeContext:true,
+  overviewPage:1,timelineLimit:40,earlierLimit:12,relatedLimit:12,includeContext:true,
   cacheKey:"",timeSliceLevel:10,timeSliceCustomized:false,sliceSpec:null,
 };
 const TIME_SLICE_TARGETS = [240,168,112,72,44,26,14,7,3,1];
@@ -358,8 +358,8 @@ async function activateAnalysis(result,{logs,model,source,synthetic=false,thresh
   state.run=run;state.logs=logs;state.source=source;state.synthetic=synthetic;
   state.threshold=threshold;state.runs=new Map([[model,run]]);state.activeModel=model;state.cacheKey=cacheKey;
   state.rowsById=run.rowsById;state.caseId=null;state.selection=null;state.edits=new Map();
-  state.dispositions=new Map();state.eventNotes=new Map();state.investigations=[];state.query="";state.account="";state.overviewPage=1;
-  $("investigation-search").value="";$("investigation-cutoff").value=String(Number((state.threshold*100).toFixed(5)));
+  state.dispositions=new Map();state.eventNotes=new Map();state.investigations=[];state.overviewPage=1;
+  $("investigation-cutoff").value=String(Number((state.threshold*100).toFixed(5)));
   updateCutoffLabel();
   $("run-notice").textContent=[run.warning||"",run.external?"Shortlisted requests were sent to OpenAI for review.":""].filter(Boolean).join(" ");
   $("run-notice").hidden=!$("run-notice").textContent;
@@ -467,14 +467,10 @@ function disposition(row,caseId=state.caseId){return state.dispositions.get(disp
 function caseRows(item){return item.rows;}
 function episodeRows(episode){return episode.rows;}
 function episodeLabel(episode){return episode.customLabel||episode.label||actionName(episode.rows[0]);}
-function overviewMatches(){
-  const query=state.query.trim().toLowerCase();
-  return state.investigations.filter((item)=>(!query||[item.title||"",item.source||"",...item.sources,...item.rows.map((row)=>`${row.user} ${row.method} ${row.path} ${row.status}`)].join(" ").toLowerCase().includes(query)));
-}
-function renderOverviewActivity(matches=overviewMatches()){
+function renderOverviewActivity(matches=state.investigations){
   if(!state.run||!$("overview-timeline-chart"))return;
-  const query=state.query.trim().toLowerCase(),ids=new Set(matches.flatMap((item)=>item.candidateIds));
-  const chartRows=state.run.rows.filter((row)=>(!query||ids.has(row.id)));
+  const ids=new Set(matches.flatMap((item)=>item.candidateIds));
+  const chartRows=state.run.rows;
   const slices=state.sliceSpec;
   const chart=window.LogCharts.renderActivity($("overview-timeline-chart"),{rows:chartRows,targetBars:slices?.count||TIME_SLICE_TARGETS[state.timeSliceLevel-1],domainStart:slices?.start,domainEnd:slices?.end,thresholdPreview:true,isFlagged:(row)=>ids.has(row.id),showAll:$("show-other-traffic").checked,onSelect:(group)=>{
     applyCutoff();
@@ -487,14 +483,14 @@ function renderOverview(){
   if(!state.run)return;
   $("overview-panel").hidden=false;$("investigation-workspace").hidden=true;
   if($("overview-activity-title"))$("overview-activity-title").textContent=$("show-other-traffic").checked?"Requests around candidate investigations":"When candidate requests occurred";
-  const matches=overviewMatches();
+  const matches=state.investigations;
   const pages=Math.max(1,Math.ceil(matches.length/8));state.overviewPage=Math.min(state.overviewPage,pages);
   const shown=matches.slice((state.overviewPage-1)*8,state.overviewPage*8);
   $("overview-counts").textContent=`${number(matches.length)} candidate investigation${matches.length===1?"":"s"}`;
   $("investigation-list").innerHTML=shown.map((item)=>{
     return `<article class="investigation-card"><div class="investigation-card-heading"><div><h3>${escapeHTML(caseTimeRange(item))}</h3><p class="investigation-card-meta">${escapeHTML(caseLineRange(item))} · ${number(item.candidateIds.length)} candidate request${item.candidateIds.length===1?"":"s"}</p></div><button class="button primary" data-open-case="${escapeHTML(item.id)}">Open investigation</button></div></article>`;
   }).join("");
-  $("overview-empty").hidden=matches.length>0;$("overview-empty").textContent=state.investigations.length?"No investigations match your search.":"No requests meet this cutoff. Lower it to broaden the investigation.";
+  $("overview-empty").hidden=matches.length>0;$("overview-empty").textContent="No requests meet this cutoff. Lower it to broaden the investigation.";
   $("overview-page").textContent=`${state.overviewPage} / ${pages}`;$("overview-previous").disabled=state.overviewPage<=1;$("overview-next").disabled=state.overviewPage>=pages;
   renderOverviewActivity(matches);
 }
@@ -614,7 +610,7 @@ function sessionSnapshot(){
     investigations:state.investigations.map((item)=>{const {rows,episodes,addedIds,...saved}=item;return {...saved,rowIds:rows.map((row)=>row.id),episodes:episodes.map(episode),addedIds:[...(addedIds||[])]};}),
     edits:[...state.edits].map(([id,value])=>[id,{...value,episodes:value.episodes.map(episode)}]),
     dispositions:[...state.dispositions],eventNotes:[...state.eventNotes],caseId:state.caseId,selection:state.selection,
-    query:state.query,account:state.account,includeContext:state.includeContext};
+    includeContext:state.includeContext};
 }
 async function restoreSession(saved){
   if(saved?.schema!=="log-order-investigation"||saved.version!==1||!Array.isArray(saved.rows)||!saved.rows.length||!Array.isArray(saved.runs)||!saved.runs.length)throw new Error("Choose a Trace investigation save (version 1).");
@@ -660,9 +656,9 @@ async function restoreSession(saved){
   state.source=String(saved.source||"Saved investigation");state.synthetic=Boolean(saved.synthetic);state.threshold=threshold;
   state.activeModel=runs.has(saved.active_model)?saved.active_model:saved.base_model;state.investigations=investigations;state.edits=edits;state.dispositions=dispositions;state.eventNotes=eventNotes;state.timeSliceLevel=timeSliceLevel;state.timeSliceCustomized=true;state.sliceSpec=sliceSpec;
   state.caseId=investigations.some((item)=>item.id===saved.caseId)?saved.caseId:null;state.selection=validSelection?selection:fallbackSelection?{type:"event",id:fallbackSelection.id}:null;
-  state.query=String(saved.query||"");state.account="";state.includeContext=true;state.overviewPage=1;state.timelineLimit=40;state.earlierLimit=12;state.relatedLimit=12;
+  state.includeContext=true;state.overviewPage=1;state.timelineLimit=40;state.earlierLimit=12;state.relatedLimit=12;
   for(const [id,cached] of runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:cached.model_name||id,available:false});
-  $("investigation-search").value=state.query;$("investigation-cutoff").value=String(Number((threshold*100).toFixed(5)));$("time-slice-size").value=String(timeSliceLevel);
+  $("investigation-cutoff").value=String(Number((threshold*100).toFixed(5)));$("time-slice-size").value=String(timeSliceLevel);
   updateCutoffLabel();
   $("run-notice").textContent="";$("run-notice").hidden=true;
   $("baseline-content").closest("details").open=false;
@@ -758,7 +754,6 @@ $("load-sample").addEventListener("click",async()=>{
   }catch(error){showError("analyze-error",error.message);}
   finally{if(revision===state.revision){state.reading=false;syncControls();}}
 });
-$("investigation-search").addEventListener("input",()=>{clearTimeout(state.searchTimer);state.query=$("investigation-search").value;state.overviewPage=1;state.searchTimer=setTimeout(renderOverview,180);});
 let cutoffFrame = null, cutoffTimer = null;
 function applyCutoff() {
   const pending=cutoffTimer!==null||cutoffFrame!==null;

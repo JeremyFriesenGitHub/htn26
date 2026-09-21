@@ -90,8 +90,6 @@ code { font: 12px var(--mono); overflow-wrap: anywhere; }
 /* Investigation overview */
 .overview-filters { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); align-items: end; gap: 28px; margin-bottom: 24px; }
 .overview-filters input { min-width: 0; }
-.overview-search { display: grid; gap: 6px; width: 100%; margin: 0 0 24px; font-size: 14px; font-weight: 650; }
-.overview-search input { width: 100%; min-width: 0; font-size: 13px; font-weight: 400; }
 .cutoff-input { display: flex; align-items: center; gap: 7px; white-space: nowrap; color: var(--muted); font-weight: 400; }
 .cutoff-input input { width: 106px; color: var(--ink); font-variant-numeric: tabular-nums; }
 .overview-filter-help { margin: 9px 0 22px; }
@@ -209,7 +207,6 @@ code { font: 12px var(--mono); overflow-wrap: anywhere; }
   .app-header { padding: 16px; }
   .investigation-grid { grid-template-columns: 1fr; }
   .overview-filters { grid-template-columns: minmax(0,1fr) auto; gap: 12px; }
-  .overview-search { grid-column: 1 / -1; }
   .model-workspace-heading { grid-template-columns: auto minmax(0,1fr); align-items: center; gap: 18px; }
   .lens-plot { max-width: 630px; }
   .timeline-list { scroll-margin-top: 16px; }

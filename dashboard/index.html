@@ -88,7 +88,6 @@
           <div class="confidence-control"><div class="confidence-label"><label for="investigation-cutoff">Model confidence</label><output id="cutoff-value" for="investigation-cutoff">100%</output></div><div class="confidence-slider"><input id="investigation-cutoff" type="range" min="0" max="100" step="0.001" value="100"></div><div class="confidence-scale"><span>More requests</span><span>More selective</span></div></div>
           <div class="confidence-control"><div class="confidence-label"><label for="time-slice-size">Time slice size</label><output id="time-slice-value" for="time-slice-size">—</output></div><div class="confidence-slider"><input id="time-slice-size" type="range" min="1" max="10" step="1" value="10"></div><div class="confidence-scale"><span>Many bars</span><span>One bar</span></div></div>
         </div>
-        <label class="overview-search" for="investigation-search">Search investigations<input id="investigation-search" type="search" placeholder="Account, source IP, or request target"></label>
         <div class="overview-list-heading"><h3>Candidate investigations</h3><p id="overview-counts" role="status"></p></div>
         <div id="investigation-list" class="investigation-list"></div>
         <p id="overview-empty" class="empty-state" hidden></p>
