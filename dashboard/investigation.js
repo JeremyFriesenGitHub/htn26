@@ -11,15 +11,6 @@
     return Number.isFinite(row.time) ? row.time : Date.parse(row.timestamp);
   }
 
-  function accountOf(row) {
-    return row.user == null || row.user === "" || row.user === "-" ? "-" : String(row.user);
-  }
-
-  function actorKey(row) {
-    const account = accountOf(row);
-    return JSON.stringify(account === "-" ? ["source", row.ip] : ["account", account]);
-  }
-
   function orderedRows(rows) {
     return rows.slice().sort((a, b) => timeOf(a) - timeOf(b) ||
       (Number.isFinite(a.id) && Number.isFinite(b.id) ? a.id - b.id : String(a.id).localeCompare(String(b.id))));
@@ -85,63 +76,78 @@
     return low;
   }
 
+  function timeSlices(rows, targetBars = 1) {
+    let start = Infinity, latest = -Infinity;
+    for (const row of rows) {
+      const time = timeOf(row);
+      if (!Number.isFinite(time)) continue;
+      start = Math.min(start, time);
+      latest = Math.max(latest, time);
+    }
+    if (!Number.isFinite(start)) return null;
+    const count = latest === start ? 1 : Math.max(1, Math.min(240, Math.round(Number(targetBars) || 1)));
+    const step = Math.max(1, latest - start + 1) / count;
+    return {start, end: start + count * step, count, step};
+  }
+
   function buildInvestigations(rows, options = {}) {
     const isCandidate = typeof options.isCandidate === "function" ? options.isCandidate : () => false;
-    const gapMs = Number.isFinite(options.gapMs) && options.gapMs >= 0 ? options.gapMs : 30 * MINUTE;
     const contextMs = 5 * MINUTE;
-    const actors = new Map();
+    const ordered = orderedRows(rows);
+    const slices = options.slices || timeSlices(ordered, options.targetBars);
+    if (!slices) return [];
+    const bySource = new Map(), byAccount = new Map(), groups = new Map();
+    const add = (index, key, row) => {
+      if (!key || key === "-") return;
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(row);
+    };
 
-    // Keep references to the original records so every visible event remains traceable.
-    for (const row of orderedRows(rows)) {
-      if (!Number.isFinite(timeOf(row))) continue;
-      const key = actorKey(row);
-      let actor = actors.get(key);
-      if (!actor) {
-        actor = {rows: [], groups: []};
-        actors.set(key, actor);
-      }
-      actor.rows.push(row);
+    for (const row of ordered) {
+      const time = timeOf(row);
+      if (!Number.isFinite(time)) continue;
+      add(bySource, row.ip, row);
+      add(byAccount, row.user, row);
       if (!isCandidate(row)) continue;
-      let group = actor.groups[actor.groups.length - 1];
-      if (!group || timeOf(row) - group.end > gapMs) {
-        group = {id: `investigation-${row.id}`, account: accountOf(row), start: timeOf(row), end: timeOf(row), candidates: []};
-        actor.groups.push(group);
-      }
-      group.candidates.push(row);
-      group.end = timeOf(row);
+      const index = Math.min(slices.count - 1, Math.max(0, Math.floor((time - slices.start) / slices.step)));
+      if (!groups.has(index)) groups.set(index, []);
+      groups.get(index).push(row);
     }
 
     const investigations = [];
-    for (const actor of actors.values()) {
-      for (const group of actor.groups) {
-        const contextStart = group.start - contextMs, contextEnd = group.end + contextMs;
-        const related = [];
-        for (let index = lowerBound(actor.rows, contextStart); index < actor.rows.length; index++) {
-          const row = actor.rows[index];
-          if (timeOf(row) > contextEnd) break;
-          related.push(row);
+    for (const [index, candidates] of groups) {
+      const relatedById = new Map(candidates.map((row) => [row.id, row]));
+      for (const candidate of candidates) {
+        const contextStart = timeOf(candidate) - contextMs, contextEnd = timeOf(candidate) + contextMs;
+        for (const [records, key] of [[bySource, candidate.ip], [byAccount, candidate.user]]) {
+          const indexed = records.get(key) || [];
+          for (let position = lowerBound(indexed, contextStart); position < indexed.length; position++) {
+            const row = indexed[position];
+            if (timeOf(row) > contextEnd) break;
+            if (!isCandidate(row)) relatedById.set(row.id, row);
+          }
         }
-        const candidateIds = group.candidates.map((row) => row.id);
-        const summary = facts(group.candidates);
-        investigations.push({
-          id: group.id,
-          account: group.account,
-          source: summary.sources[0] || "",
-          sources: summary.sources,
-          start: group.start,
-          end: group.end,
-          rows: related,
-          candidateIds,
-          episodes: buildEpisodes(related, candidateIds),
-          summary: {...summary, candidateCount: candidateIds.length, contextCount: related.length - candidateIds.length},
-          contextStart: related.length ? timeOf(related[0]) : group.start,
-          contextEnd: related.length ? timeOf(related[related.length - 1]) : group.end,
-          grouping: {gapMs, contextMs, linkedBy: group.account === "-" ? "source IP" : "account"},
-        });
       }
+      const related = orderedRows([...relatedById.values()]);
+      const candidateIds = candidates.map((row) => row.id);
+      const summary = facts(candidates);
+      investigations.push({
+        id: `investigation-${candidates[0].id}`,
+        source: candidates[0].ip,
+        sources: summary.sources,
+        start: timeOf(candidates[0]),
+        end: timeOf(candidates[candidates.length - 1]),
+        rows: related,
+        candidateIds,
+        episodes: buildEpisodes(related, candidateIds),
+        summary: {...summary, candidateCount: candidateIds.length, contextCount: related.length - candidateIds.length},
+        contextStart: related.length ? timeOf(related[0]) : timeOf(candidates[0]),
+        contextEnd: related.length ? timeOf(related[related.length - 1]) : timeOf(candidates[candidates.length - 1]),
+        grouping: {contextMs, linkedBy: "time slice", sliceStart: slices.start + index * slices.step, sliceEnd: slices.start + (index + 1) * slices.step},
+      });
     }
     return investigations.sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
   }
 
-  return {buildInvestigations, buildEpisodes};
+  return {buildInvestigations, buildEpisodes, timeSlices};
 });
