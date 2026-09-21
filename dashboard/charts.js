@@ -1,7 +1,7 @@
 /* Log charts: plotted values and tooltip counts always come from the scoped rows. */
 (function (root) {
   "use strict";
-  const HOUR = 3600000, DAY = 24 * HOUR, SVG_NS = "http://www.w3.org/2000/svg";
+  const MINUTE = 60000, HOUR = 60 * MINUTE, DAY = 24 * HOUR, SVG_NS = "http://www.w3.org/2000/svg";
   const number = (value) => Number(value).toLocaleString("en-US");
   const score = (value) => Number.isFinite(value) ? (value * 100).toFixed(2) : "—";
   const shortNumber = (value) => {
@@ -11,9 +11,9 @@
     return magnitude >= 100000 || magnitude < 0.001 ? value.toExponential(2) : Number(value.toPrecision(4)).toLocaleString("en-US", {maximumFractionDigits: 6});
   };
   const timeOf = (row) => typeof row.time === "number" ? row.time : new Date(row.time ?? row.timestamp).getTime();
-  const utc = (value) => new Date(value).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  const localTime = (value) => new Intl.DateTimeFormat("en-US", {year:"numeric",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23",timeZoneName:"short"}).format(new Date(value));
   const dateTick = (value, timeOnly) => new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC", ...(timeOnly ? {hour: "2-digit", minute: "2-digit", hourCycle: "h23"} : {month: "short", day: "numeric"}),
+    ...(timeOnly ? {hour: "2-digit", minute: "2-digit", hourCycle: "h23"} : {month: "short", day: "numeric"}),
   }).format(new Date(value));
   const defaultFlagged = (row, options) => typeof options.isFlagged === "function" ? options.isFlagged(row) : row.score >= (options.threshold ?? .75);
   function extents(rows) {
@@ -82,10 +82,26 @@
     let minTime = Infinity, maxTime = -Infinity;
     for (const row of rows) { const time = timeOf(row); if (Number.isFinite(time)) { minTime = Math.min(minTime, time); maxTime = Math.max(maxTime, time); } }
     if (!Number.isFinite(minTime)) return {buckets: [], unit: HOUR, step: HOUR};
-    const unit = maxTime - minTime <= 2 * DAY ? HOUR : DAY;
-    const maxBars = Math.max(4, Math.min(72, Math.floor((options.width || 640) / 14)));
-    let multiplier = Math.max(1, Math.ceil((maxTime - minTime + 1) / unit / maxBars));
-    let step = unit * multiplier, start = Math.floor(minTime / step) * step;
+    const requestedBars=Number(options.targetBars);
+    if(Number.isFinite(requestedBars)&&requestedBars>=1){
+      // Exact bucket counts make every slider stop visibly different. In particular,
+      // the widest setting contains the entire upload in one bar.
+      const fixedDomain=Number.isFinite(options.domainStart)&&Number.isFinite(options.domainEnd)&&options.domainEnd>options.domainStart;
+      const count=(fixedDomain?options.domainEnd-options.domainStart<=1:maxTime===minTime)?1:Math.max(1,Math.min(240,Math.round(requestedBars)));
+      const start=fixedDomain?options.domainStart:minTime;
+      const step=(fixedDomain?options.domainEnd-start:Math.max(1,maxTime-minTime+1))/count;
+      const buckets=Array.from({length:count},(_,index)=>({...newGroup(),start:start+index*step,end:start+(index+1)*step}));
+      for(const row of rows){
+        const time=timeOf(row);if(!Number.isFinite(time))continue;
+        addRow(buckets[Math.min(count-1,Math.max(0,Math.floor((time-start)/step)))],row,defaultFlagged(row,options));
+      }
+      return {buckets,step,minTime,maxTime,start,end:start+count*step};
+    }
+    const unit=maxTime-minTime<=2*DAY?HOUR:DAY;
+    const maxBars=Math.max(4,Math.min(72,Math.floor((options.width||640)/14)));
+    let multiplier=Math.max(1,Math.ceil((maxTime-minTime+1)/unit/maxBars));
+    let step=unit*multiplier;
+    let start = Math.floor(minTime / step) * step;
     while (Math.floor((maxTime - start) / step) + 1 > maxBars) { multiplier++; step = unit * multiplier; start = Math.floor(minTime / step) * step; }
     const count = Math.floor((maxTime - start) / step) + 1;
     const buckets = Array.from({length: count}, (_, index) => ({...newGroup(), start: start + index * step, end: start + (index + 1) * step}));
@@ -94,6 +110,14 @@
       addRow(buckets[Math.min(count - 1, Math.floor((time - start) / step))], row, defaultFlagged(row, options));
     }
     return {buckets, unit, step, multiplier, minTime, maxTime, start, end: start + count * step};
+  }
+  function activityInterval(step) {
+    if(step<MINUTE)return `${Math.max(1,Math.round(step/1000))}s`;
+    const totalMinutes=Math.max(1,Math.round(step/MINUTE));
+    const days=Math.floor(totalMinutes/1440),hours=Math.floor(totalMinutes%1440/60),minutes=totalMinutes%60;
+    if(days)return `${days}d${hours?` ${hours}h`:""}`;
+    if(hours)return `${hours}h${minutes?` ${minutes}m`:""}`;
+    return `${minutes}m`;
   }
 
   const instances = new WeakMap();
@@ -157,11 +181,11 @@
     body.append(element("strong", "log-chart-tooltip-title", title));
     const details = element("dl", "log-chart-tooltip-values");
     if (!scatter) {
-      pair(details, "When", `${dateTick(group.start, false)} ${dateTick(group.start, true)} – ${dateTick(group.end, false)} ${dateTick(group.end, true)} UTC`);
+      pair(details, "When", `${localTime(group.start)} – ${localTime(group.end)}`);
       if (state.type === "timeline") pair(details, "Who", `${group.account === "-" ? "Anonymous" : group.account} · ${group.source}`);
       else if (options.showAll) pair(details, "Other requests", number(group.count - group.flagged));
     } else {
-      pair(details, "When", group.minTime === group.maxTime ? utc(group.minTime) : `${utc(group.minTime)} – ${utc(group.maxTime)}`);
+      pair(details, "When", group.minTime === group.maxTime ? localTime(group.minTime) : `${localTime(group.minTime)} – ${localTime(group.maxTime)}`);
       if (single) pair(details, "Who", `${group.examples[0].user === "-" ? "Anonymous" : group.examples[0].user} · ${group.examples[0].ip}`);
       else pair(details, "Candidates", `${number(group.flagged)} of ${number(group.count)}`);
       const low = group.rawCount ? shortNumber(group.minRaw) : score(group.minScore);
@@ -241,13 +265,13 @@
       const time = data.xMin + (data.xMax - data.xMin) * index / tickCount;
       svgText(svg, left + plotWidth * index / tickCount, height - 21, dateTick(time, data.xMax - data.xMin < DAY), index === 0 ? "start" : index === tickCount ? "end" : "middle");
     }
-    svgText(svg, width - right, height - 3, "Time (UTC)", "end");
+    svgText(svg, width - right, height - 3, "Time (local)", "end");
     if (!data.allRaw && Number.isFinite(options.threshold)) {
       const y = top + plotHeight * (1 - options.threshold);
       svg.append(svgElement("line", {x1: left, x2: width - right, y1: y, y2: y, class: "log-chart-cutoff"}));
     }
     data.groups.forEach((group, index) => {
-      const label = `${number(group.count)} request${group.count === 1 ? "" : "s"}, ${number(group.flagged)} review candidates, ${utc(group.minTime)}. ${group.count === 1 ? "Activate for request details." : "Activate for grouped request details."}`;
+      const label = `${number(group.count)} request${group.count === 1 ? "" : "s"}, ${number(group.flagged)} review candidates, ${localTime(group.minTime)}. ${group.count === 1 ? "Activate for request details." : "Activate for grouped request details."}`;
       const mark = svgElement("g", {transform: `translate(${left + group.x} ${top + group.y})`, class: "log-chart-mark", tabindex: index === 0 ? "0" : "-1", role: "button", "data-chart-mark": index, "aria-label": label});
       mark.append(svgElement("circle", {r: Math.min(7, 3.5 + Math.log2(group.count + 1) * .55), class: `log-chart-point ${group.flagged ? "flagged" : ""}`}));
       mark.append(svgElement("circle", {r: 9, class: "log-chart-point-hit", "aria-hidden": "true"}));
@@ -275,22 +299,22 @@
     const slot = plotWidth / data.buckets.length;
     const bars = [];
     data.buckets.forEach((bucket, index) => {
-      const x = left + slot * index, barWidth = Math.max(2, Math.min(slot * .68, 44)), barX = x + (slot - barWidth) / 2;
+      const x = left + slot * index, barWidth = Math.max(2, Math.min(slot * .68, data.buckets.length === 1 ? 96 : 44)), barX = x + (slot - barWidth) / 2;
       const totalHeight = (options.showAll ? bucket.count : bucket.flagged) / max * plotHeight, flaggedHeight = bucket.flagged / max * plotHeight;
       const belowHeight = options.showAll ? (bucket.count - bucket.flagged) / max * plotHeight : 0;
       const totalBar=svgElement("rect", {x: barX, y: top + plotHeight - belowHeight, width: barWidth, height: belowHeight, class: "log-chart-bar total"});
       const flaggedBar=svgElement("rect", {x: barX, y: top + plotHeight - totalHeight, width: barWidth, height: flaggedHeight, class: "log-chart-bar flagged"});
       svg.append(totalBar,flaggedBar); bars.push({totalBar,flaggedBar});
-      svg.append(svgElement("rect", {x, y: top, width: slot, height: plotHeight, tabindex: index === 0 ? "0" : "-1", role: "button", class: "log-chart-bucket-hit", "data-chart-mark": index, "aria-label": `${utc(bucket.start)} to ${utc(bucket.end)}: ${number(bucket.count)} requests, ${number(bucket.flagged)} review candidates, ${number(bucket.users.size)} accounts. Activate for details.`}));
+      svg.append(svgElement("rect", {x, y: top, width: slot, height: plotHeight, tabindex: index === 0 ? "0" : "-1", role: "button", class: "log-chart-bucket-hit", "data-chart-mark": index, "aria-label": `${localTime(bucket.start)} to ${localTime(bucket.end)}: ${number(bucket.count)} requests, ${number(bucket.flagged)} review candidates, ${number(bucket.users.size)} accounts. Activate for details.`}));
     });
     const ticks = width < 450 ? 2 : 4;
     for (let index = 0; index <= ticks; index++) {
       const time = data.start + (data.end - data.start) * index / ticks;
       svgText(svg, left + plotWidth * index / ticks, height - 20, dateTick(time, data.end - data.start <= DAY), index === 0 ? "start" : index === ticks ? "end" : "middle");
     }
-    svgText(svg, width - right, height - 3, "Time (UTC)", "end");
+    svgText(svg, width - right, height - 3, "Time (local)", "end");
     host.append(svg); if (options.showAll) legend(host, "activity"); bindMarks(state, svg, data.buckets);
-    const interval = `${data.multiplier === 1 ? "" : data.multiplier + "-"}${data.unit === DAY ? "day" : "hour"}`;
+    const interval = activityInterval(data.step);
     // Index each bucket once. Dragging then uses binary search, not a scan of every request.
     const scoreIndex = options.thresholdPreview ? data.buckets.map(()=>[]) : null;
     if(scoreIndex) {
@@ -302,7 +326,7 @@
       for(const scores of scoreIndex)scores.sort((a,b)=>a-b);
     }
     const marks=Array.from(svg.querySelectorAll("[data-chart-mark]"));
-    return {axisLabel: "Requests", caption: `${options.showAll ? "All requests" : "Review candidates"} per ${interval}. Select a bar to view its requests.${!data.buckets.some((bucket) => bucket.flagged) ? " No candidates at this cutoff." : ""}`,
+    return {axisLabel: "Requests", intervalLabel:interval, caption: `${options.showAll ? "All requests" : "Review candidates"} per ${interval}. Select a bar to view its requests.${!data.buckets.some((bucket) => bucket.flagged) ? " No candidates at this cutoff." : ""}`,
       updateThreshold(cutoff) {
         if(!scoreIndex)return;
         let highest=1,totalCandidates=0;
@@ -321,7 +345,7 @@
           const flagged=bucket.flagged/max*plotHeight;
           totalBar.setAttribute("y",top+plotHeight-below);totalBar.setAttribute("height",below);
           flaggedBar.setAttribute("y",top+plotHeight-below-flagged);flaggedBar.setAttribute("height",flagged);
-          marks[index].setAttribute("aria-label",`${utc(bucket.start)} to ${utc(bucket.end)}: ${number(bucket.flagged)} review candidates. Activate for details.`);
+          marks[index].setAttribute("aria-label",`${localTime(bucket.start)} to ${localTime(bucket.end)}: ${number(bucket.flagged)} review candidates. Activate for details.`);
         });
         if(state.active)fillTooltip(state,state.active);
         return totalCandidates;
@@ -368,7 +392,7 @@
     const ordered = [...groups.values()].sort((a, b) => a.lane - b.lane || a.bucket - b.bucket);
     ordered.forEach((group, index) => {
       const x = left + group.bucket * slot, y = top + group.lane * rowHeight;
-      const mark = svgElement("g", {class: "log-chart-mark", tabindex: index === 0 ? 0 : -1, role: "button", "data-chart-mark": index, "aria-label": `${group.account === "-" ? "Anonymous" : group.account}, ${group.source}, ${number(group.count)} candidates, ${utc(group.start)} to ${utc(group.end)}. Activate to view requests.`});
+      const mark = svgElement("g", {class: "log-chart-mark", tabindex: index === 0 ? 0 : -1, role: "button", "data-chart-mark": index, "aria-label": `${group.account === "-" ? "Anonymous" : group.account}, ${group.source}, ${number(group.count)} candidates, ${localTime(group.start)} to ${localTime(group.end)}. Activate to view requests.`});
       mark.append(svgElement("rect", {x: x + 1, y: y + 8, width: Math.max(2, slot - 2), height: 32, class: "timeline-cell"}));
       if (slot >= 30) svgText(mark, x + slot / 2, y + 29, number(group.count), "middle", "timeline-count");
       svg.append(mark);
@@ -378,7 +402,7 @@
       const time = bins.start + (bins.end - bins.start) * index / ticks;
       svgText(svg, left + plotWidth * index / ticks, height - 19, dateTick(time, bins.end - bins.start <= DAY), index === 0 ? "start" : index === ticks ? "end" : "middle");
     }
-    svgText(svg, width - right, height - 2, "Time (UTC)", "end");
+    svgText(svg, width - right, height - 2, "Time (local)", "end");
     host.append(svg); bindMarks(state, svg, ordered);
     return {caption: `${visible.length < ranked.length ? `Top ${visible.length} of ${number(ranked.length)} account / IP pairs by candidate count. ` : ""}Select a cell to review that account’s requests in that period. Blank periods have no candidates.`};
   }

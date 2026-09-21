@@ -735,7 +735,7 @@ def sample_payload():
         "amanda_l": ("10.0.8.22", ("/it/scripts/backup.sh", "/it/network_map.pdf")),
         "ashley_k": ("10.0.7.11", ("/sales/leads_raw.csv", "/sales/targets_q1.xlsx")),
         "chris_b": ("10.0.6.34", ("/marketing/brand_guide.pdf", "/marketing/assets/campaign_q1.zip")),
-        "david_m": ("10.0.8.45", ("/finance/reports/public_summary.pdf", "/finance/templates/expense.docx")),
+        "john_m": ("10.0.8.45", ("/finance/reports/public_summary.pdf", "/finance/templates/expense.docx")),
         "jessica_w": ("10.0.6.21", ("/marketing/brand_guide.pdf", "/marketing/assets/campaign_q1.zip")),
         "joshua_c": ("10.0.8.50", ("/eng/architecture_v2.pdf", "/eng/api_docs.html")),
         "matthew_r": ("10.0.7.15", ("/sales/leads_raw.csv", "/sales/targets_q1.xlsx")),
@@ -767,9 +767,14 @@ def sample_payload():
         return 220 + rng.randrange(7800)
 
     # Ten days of ordinary traffic provide account, source, endpoint and status history.
+    # Workload varies by day so narrow time slices show bursts and quiet periods,
+    # rather than one similarly sized block at the same hour every day.
+    daily_start_hours = (8, 10, 7, 13, 9, 11, 8, 12, 7, 10)
+    daily_load = (1.35, .65, 1.25, .85, 1.45, .50, .60, 1.15, 1.35, .85)
     for day in range(10):
         for user_index, (user, (ip, resources)) in enumerate(profiles.items()):
-            first = start + timedelta(days=day, hours=8, minutes=5 + rng.randrange(105),
+            first = start + timedelta(days=day, hours=daily_start_hours[day],
+                                      minutes=rng.randrange(-45, 181),
                                       seconds=rng.randrange(60))
             if (day * 3 + user_index) % 17 == 0:
                 add(first, ip, user, "POST", "/api/auth/login", 401, response_size("/api/auth/login", 401))
@@ -777,13 +782,14 @@ def sample_payload():
             add(first, ip, user, "POST", "/api/auth/login", 200, response_size("/api/auth/login", 200))
 
             when = first
-            request_count = 12 + rng.randrange(11)
+            request_count = max(6, round((12 + rng.randrange(11)) * daily_load[day]))
+            pause_count = min(rng.choice((1, 2, 3)), request_count - 5)
+            pauses = set(rng.sample(range(3, request_count - 2), pause_count))
             for request_index in range(request_count):
-                # Most requests cluster into work sessions; occasional longer gaps keep
-                # the sample from looking mechanically generated.
+                # Short bursts have irregular pauses at different points in each session.
                 gap = min(840, 8 + int(rng.expovariate(1 / 105)))
-                if request_index in (6, 14):
-                    gap += 900 + rng.randrange(2400)
+                if request_index in pauses:
+                    gap += 600 + rng.randrange(4200)
                 when += timedelta(seconds=gap)
                 choice = rng.randrange(12)
                 method, status = "GET", 200
@@ -809,15 +815,16 @@ def sample_payload():
     # inspectable from this upload.
     for day, hour, minute in ((1, 10, 41), (4, 15, 3), (7, 9, 19)):
         when = start + timedelta(days=day, hours=hour, minutes=minute, seconds=rng.randrange(60))
-        add(when, "10.0.8.45", "david_m", "GET",
+        add(when, "10.0.8.45", "john_m", "GET",
             "/finance/reports/q1_draft_CONFIDENTIAL.zip", 403, 245)
 
-    # A separate external probe gives the dashboard a short, source-linked case.
+    # A separate probe from an unfamiliar source gives the dashboard a short case
+    # with an identifiable account and earlier internal activity for comparison.
     scan = start + timedelta(days=5, hours=3, minutes=17)
-    add(scan, "203.0.113.18", "-", "GET", "/api/search?q=1%27+OR+%271%27=%271", 400, 188)
-    add(scan + timedelta(seconds=11), "203.0.113.18", "-", "GET", "/assets/app.js", 200, 4550)
-    add(scan + timedelta(seconds=37), "203.0.113.18", "-", "GET", "/files?name=../../etc/passwd", 403, 245)
-    add(scan + timedelta(minutes=3, seconds=8), "203.0.113.18", "-", "GET", "/api/internal/debug/dump", 404, 212)
+    add(scan, "203.0.113.18", "matthew_r", "GET", "/api/search?q=1%27+OR+%271%27=%271", 400, 188)
+    add(scan + timedelta(seconds=11), "203.0.113.18", "matthew_r", "GET", "/assets/app.js", 200, 4550)
+    add(scan + timedelta(seconds=37), "203.0.113.18", "matthew_r", "GET", "/files?name=../../etc/passwd", 403, 245)
+    add(scan + timedelta(minutes=3, seconds=8), "203.0.113.18", "matthew_r", "GET", "/api/internal/debug/dump", 404, 212)
 
     # The principal incident is intentionally uneven. It supports an analyst story
     # spanning credential attempts, exploit development, a privileged action and
@@ -833,11 +840,11 @@ def sample_payload():
             "POST", "/api/auth/login", 401, 88)
 
     incident_day = start + timedelta(days=8)
-    add(incident_day + timedelta(hours=9, minutes=20, seconds=20), "10.0.8.45", "david_m",
+    add(incident_day + timedelta(hours=9, minutes=20, seconds=20), "10.0.8.45", "john_m",
         "POST", "/intranet/forum/new?topic=lunch_menu&payload=csrf_test", 500, 1024)
-    add(incident_day + timedelta(hours=9, minutes=42, seconds=35), "10.0.8.45", "david_m",
+    add(incident_day + timedelta(hours=9, minutes=42, seconds=35), "10.0.8.45", "john_m",
         "POST", "/intranet/forum/new?topic=q1_updates&action=csrf_role_update", 400, 612)
-    add(incident_day + timedelta(hours=10, minutes=18, seconds=52), "10.0.8.45", "david_m",
+    add(incident_day + timedelta(hours=10, minutes=18, seconds=52), "10.0.8.45", "john_m",
         "POST", "/intranet/forum/new?topic=parking_issues&script=success", 302, 491)
 
     role_change = incident_day + timedelta(hours=11, minutes=7, seconds=57)
@@ -848,13 +855,13 @@ def sample_payload():
         "GET", "/assets/avatar_1042.png", 200, 18320)
 
     archive = incident_day + timedelta(hours=11, minutes=26, seconds=59)
-    add(archive - timedelta(minutes=2, seconds=14), "10.0.8.45", "david_m",
+    add(archive - timedelta(minutes=2, seconds=14), "10.0.8.45", "john_m",
         "GET", "/finance/reports/public_summary.pdf", 200, 154200)
-    add(archive, "10.0.8.45", "david_m", "GET",
+    add(archive, "10.0.8.45", "john_m", "GET",
         "/finance/reports/q1_draft_CONFIDENTIAL.zip", 200, 8459200)
-    add(archive + timedelta(seconds=43), "10.0.8.45", "david_m",
+    add(archive + timedelta(seconds=43), "10.0.8.45", "john_m",
         "GET", "/api/notifications/poll", 200, 282)
-    add(incident_day + timedelta(hours=11, minutes=48, seconds=1), "10.0.8.45", "david_m",
+    add(incident_day + timedelta(hours=11, minutes=48, seconds=1), "10.0.8.45", "john_m",
         "POST", "/intranet/forum/edit/1042", 302, 424)
 
     takeover = incident_day + timedelta(hours=22, minutes=29, seconds=43)

@@ -70,14 +70,6 @@
     return Number(value.toPrecision(4)).toLocaleString("en-US", {maximumFractionDigits: 6});
   }
 
-  function percentile(value) {
-    if (!Number.isFinite(value)) return "Not supplied";
-    if (value === 1) return "100";
-    const number = value * 100;
-    const label = Number(number.toFixed(number >= 99.99 ? 6 : number >= 99 ? 4 : 2));
-    return number < 100 && label >= 100 ? "99.999999+" : String(label);
-  }
-
   function extent(rows, getValue) {
     let min = Infinity, max = -Infinity, count = 0;
     for (const row of rows) {
@@ -88,33 +80,26 @@
     return {min, max, count};
   }
 
-  function rangeText(range, format = exact, unit = "") {
-    if (!range.count) return "Not supplied";
-    return (range.min === range.max ? format(range.min) : `${format(range.min)} – ${format(range.max)}`) + unit;
-  }
+  const SIGNAL_LABELS = {
+    "new-IP-for-user": "New source for account",
+    "never-seen-endpoint": "Unseen endpoint",
+    "unusual-status-for-endpoint": "Unusual response for endpoint",
+    "success-on-usually-denied-resource": "Access changed from denied to successful",
+    "rare-status": "Rare response status",
+    "authentication-required": "Authentication required",
+    "failed-login": "Failed login",
+    "administrative-write": "Administrative write",
+    "suspicious-request-content": "Suspicious request content",
+    "large-successful-response": "Large successful response",
+    "bulk-or-sensitive-download": "Sensitive or bulk download",
+    "outside-07-to-20-hours": "Outside usual hours",
+  };
 
-  function metric(doc, list, label, value, note) {
-    const item = el(doc, "div", "lens-metric");
-    item.append(el(doc, "dt", "", label), el(doc, "dd", "", value));
-    if (note) item.append(el(doc, "dd", "lens-metric-note", note));
-    list.append(item);
-  }
-
-  function verdict(rows, cutoff, run) {
-    let scored = 0, candidates = 0;
-    for (const row of rows) if (Number.isFinite(row.score)) {
-      scored++; if (row.score >= cutoff) candidates++;
-    }
-    const kind = run.detector_score_kind || run.score_kind;
-    const label = run.model === "rules" ? `rule score ${percentile(cutoff)}` : `${percentile(cutoff)} ${kind === "calibrated" ? "training" : "upload"} percentile`;
-    if (!scored) return {text: "Not scored by this model", candidates, scored};
-    if (!Number.isFinite(cutoff)) return {text: `${scored.toLocaleString()} scored · no cutoff supplied`, candidates, scored};
-    if (rows.length === 1) return {text: `${candidates ? "Meets review cutoff" : "Below review cutoff"} · ${label}`, candidates, scored};
-    return {
-      text: `${candidates.toLocaleString()} of ${scored.toLocaleString()} scored events meet cutoff · ${label}` +
-        (scored < rows.length ? ` · ${(rows.length - scored).toLocaleString()} not scored` : ""),
-      candidates, scored,
-    };
+  function signalLabel(value) {
+    if (SIGNAL_LABELS[value]) return SIGNAL_LABELS[value];
+    const failures = String(value).match(/^(\d+)-(?:prior-)?failed-logins-in-60s$/);
+    if (failures) return `${failures[1]} failed logins in 60 seconds`;
+    return String(value).replace(/-/g, " ").replace(/^./, (letter) => letter.toUpperCase());
   }
 
   function renderPlot(doc, host, rows, selected, info, cutoff, onSelectEvent) {
@@ -244,40 +229,17 @@
       host.append(el(doc, "p", "lens-empty", "Run a model on this upload to inspect its evidence."));
       return;
     }
-    const info = describeModel(run), selected = options.selectedRows || [], rows = options.allRows || run.rows || [];
-    const cutoff = Number.isFinite(options.cutoff) ? options.cutoff : run.review_threshold;
+    const selected = options.selectedRows || [];
     const lens = el(doc, "section", "model-lens");
-    const heading = el(doc, "div", "lens-heading");
-    heading.append(el(doc, "h3", "", info.name), el(doc, "p", "", info.meaning)); lens.append(heading);
     if (!selected.length) {
       lens.append(el(doc, "p", "lens-empty", "No events from this selection were scored by this model."));
       host.append(lens); return;
     }
 
-    const result = verdict(selected, cutoff, run);
-    lens.append(el(doc, "p", `lens-verdict${result.candidates ? " has-candidates" : ""}`, result.text));
-    const metrics = el(doc, "dl", "lens-metrics");
-    const native = extent(selected, run.model === "rules" ? ruleScore : (row) => row.raw_score);
-    metric(doc, metrics, info.scoreLabel, rangeText(native, exact, info.unit), selected.length > 1 && native.count ? "Selected event range" : null);
-    if (run.model !== "rules") {
-      const baseline = extent(selected, (row) => row.baseline_percentile);
-      const batch = extent(selected, (row) => row.batch_percentile);
-      let above = 0;
-      for (const row of selected) if (row.above_baseline === true) above++;
-      metric(doc, metrics, "Training percentile", rangeText(baseline, percentile), above ? `${above === 1 && selected.length === 1 ? "Score exceeds" : `${above.toLocaleString()} scores exceed`} the observed training range` : null);
-      if (batch.count) metric(doc, metrics, "Upload percentile", rangeText(batch, percentile));
-    }
-    lens.append(metrics);
-    renderPlot(doc, lens, rows, selected, info, cutoff, options.onSelectEvent);
     if (run.model === "hybrid" || run.score_kind === "triaged") renderTriage(doc, lens, selected);
-    const hasAdditional = renderSuppliedEvidence(doc, lens, selected);
-    const details = el(doc, "details", "lens-detail");
-    details.append(el(doc, "summary", "", "How to read this model"));
-    details.append(el(doc, "p", "", info.method));
-    details.append(el(doc, "p", "lens-note", "Scores and percentiles describe unusual behavior, not the probability of an attack. A review cutoff is an analyst filter, not a confirmed incident verdict."));
-    if (!hasAdditional) details.append(el(doc, "p", "lens-note", info.unavailable));
-    lens.append(details); host.append(lens);
+    renderSuppliedEvidence(doc, lens, selected);
+    if (lens.childNodes.length) host.append(lens);
   }
 
-  return {describeModel, render};
+  return {describeModel, render, signalLabel};
 });
