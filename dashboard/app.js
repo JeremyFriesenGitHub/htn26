@@ -395,7 +395,8 @@ async function analyze(logs,model,source,synthetic=false) {
     }else updateProgress({stage:"display",message:"Loading the saved analysis from this browser."});
     await activateAnalysis(result,{logs,model,source,synthetic,cacheKey:cacheReady?cacheKey:""});
     showResults();persistActiveAnalysis();
-    toast(fromCache?"Loaded cached model results.":`${number(state.investigations.length)} candidate investigations found.`);
+    const investigationCount=state.investigations.length;
+    toast(fromCache?"Loaded cached model results.":`${number(investigationCount)} candidate investigation${investigationCount===1?"":"s"} found.`);
   } catch(error){showError("analyze-error",error.message);}
   finally{state.busy=false;syncControls();}
 }

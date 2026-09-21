@@ -328,8 +328,8 @@ a.nav-link { display: inline-flex; align-items: center; }
 .home-hero { max-width: 780px; padding: 34px 0 58px; }
 .home-hero h1 { font-size: clamp(28px, 3.2vw, 38px); line-height: 1; letter-spacing: -1px; font-weight: 600; }
 .home-hero p { max-width: 660px; font-size: 17px; line-height: 1; color: var(--muted); margin: 22px 0 26px; }
-.workflow-section h2, .home-explainer h2 { font-size: 24px; letter-spacing: -.5px; }
-.workflow-diagram { list-style: none; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); margin: 24px 0 58px; padding: 0; border: 1px solid var(--line); background: var(--surface); }
+.home-explainer h2 { font-size: 24px; letter-spacing: -.5px; }
+.workflow-diagram { list-style: none; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); margin: 0 0 16px; padding: 0; border: 1px solid var(--line); background: var(--surface); }
 .workflow-diagram li { padding: 26px; position: relative; }
 .workflow-diagram li + li { border-left: 1px solid var(--line); }
 .workflow-diagram li + li::before { content: '→'; position: absolute; left: -12px; top: 29px; background: var(--surface); color: var(--muted); padding: 0 4px; }
@@ -347,7 +347,7 @@ a.nav-link { display: inline-flex; align-items: center; }
 .evidence-sheet { border-left: 2px solid #50725e; padding: 8px 15px; }
 .evidence-sheet i { display: block; height: 5px; width: 85%; background: #d7ddd8; margin-bottom: 11px; }
 .evidence-sheet i:last-child { width: 60%; }
-.home-explainer { max-width: 760px; padding-top: 38px; }
+.home-explainer { max-width: 760px; }
 .home-explainer p { color: var(--muted); margin-top: 16px; line-height: 1.7; }
 .home-explainer a { display: inline-block; margin-top: 20px; }
 #models-panel { max-width: 1100px; margin: auto; }
