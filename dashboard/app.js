@@ -19,15 +19,16 @@ const dayLabel = (time) => dateFormat(time, {month:"short", day:"numeric"});
 const timeLabel = (time) => dateFormat(time, {hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23"});
 const zoneLabel = (time) => new Intl.DateTimeFormat("en-US", {timeZoneName:"short"}).formatToParts(new Date(time)).find((part)=>part.type==="timeZoneName").value;
 const Investigation = window.LogInvestigation;
+const TIME_SLICE_TARGETS = [240,168,112,72,44,26,14,7,3,1];
+const DEFAULT_TIME_SLICE_LEVEL = Math.round((TIME_SLICE_TARGETS.length+1)/2);
 const state = {
   ready:false,busy:false,reading:false,revision:0,inputMode:"file",file:null,models:[],
   run:null,source:"",synthetic:false,threshold:1,logs:"",rowsById:new Map(),
   runs:new Map(),activeModel:"",modelBusy:false,investigations:[],caseId:null,
   selection:null,edits:new Map(),dispositions:new Map(),eventNotes:new Map(),
   overviewPage:1,timelineLimit:40,earlierLimit:12,relatedLimit:12,includeContext:true,
-  cacheKey:"",timeSliceLevel:10,timeSliceCustomized:false,sliceSpec:null,
+  cacheKey:"",timeSliceLevel:DEFAULT_TIME_SLICE_LEVEL,timeSliceCustomized:false,sliceSpec:null,
 };
-const TIME_SLICE_TARGETS = [240,168,112,72,44,26,14,7,3,1];
 const defaultCutoff = () => 1;
 const isCandidate = (row) => Review.isCandidate(row,state.threshold);
 const shortTime = (time) => `${dayLabel(time)} ${timeLabel(time)} ${zoneLabel(time)}`;
@@ -408,7 +409,7 @@ async function restoreActiveAnalysis() {
   if(!cached?.result||typeof cached.logs!=="string"||typeof cached.model!=="string")return false;
   const threshold=Number.isFinite(pointer.threshold)&&pointer.threshold>=0&&pointer.threshold<=1?pointer.threshold:defaultCutoff(cached.result);
   state.timeSliceCustomized=pointer.timeSliceCustomized===true;
-  $("time-slice-size").value=String(state.timeSliceCustomized?Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number(pointer.timeSliceLevel)||10)):10);
+  $("time-slice-size").value=String(state.timeSliceCustomized?Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number(pointer.timeSliceLevel)||DEFAULT_TIME_SLICE_LEVEL)):DEFAULT_TIME_SLICE_LEVEL);
   await activateAnalysis(cached.result,{logs:cached.logs,model:cached.model,source:String(pointer.source||"Cached analysis"),synthetic:Boolean(pointer.synthetic),threshold,cacheKey:pointer.key});
   if(!state.models.some((model)=>model.id===cached.model))state.models.push({id:cached.model,name:state.run.model_name||cached.model,available:false});
   return true;
@@ -416,7 +417,7 @@ async function restoreActiveAnalysis() {
 function rebuildInvestigations(){
   const previous=state.investigations,previousEdits=new Map(state.edits),byCandidate=new Map(),previousById=new Map(previous.map((item)=>[item.id,item]));
   for(const item of previous)for(const id of item.candidateIds){if(!byCandidate.has(id))byCandidate.set(id,[]);byCandidate.get(id).push(item);}
-  const level=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number($("time-slice-size").value)||10));
+  const level=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number($("time-slice-size").value)||DEFAULT_TIME_SLICE_LEVEL));
   state.timeSliceLevel=level;
   state.sliceSpec=Investigation.timeSlices(state.run.rows,TIME_SLICE_TARGETS[level-1]);
   const inherited=new Set(),rebuilt=Investigation.buildInvestigations(state.run.rows,{isCandidate,slices:state.sliceSpec});
@@ -637,7 +638,7 @@ async function restoreSession(saved){
   const rowRefs=(rowIds)=>{if(!Array.isArray(rowIds)||rowIds.some((id)=>!run.rowsById.has(id)))throw new Error("The timeline refers to missing records.");return rowIds.map((id)=>run.rowsById.get(id));};
   const episode=(item)=>{if(!safeId(item.id))throw new Error("Invalid episode identifier.");const rows=rowRefs(item.rowIds);if(!rows.length)throw new Error("An episode has no records.");return {...item,rows,start:rows[0].time,end:rows[rows.length-1].time};};
   const threshold=Number.isFinite(saved.threshold)&&saved.threshold>=0&&saved.threshold<=1?saved.threshold:defaultCutoff(run);
-  const timeSliceLevel=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number(saved.time_slice_level)||10));
+  const timeSliceLevel=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number(saved.time_slice_level)||DEFAULT_TIME_SLICE_LEVEL));
   const sliceSpec=Investigation.timeSlices(run.rows,TIME_SLICE_TARGETS[timeSliceLevel-1]);
   const investigations=saved.investigations? saved.investigations.map((item)=>{
     if(!safeId(item.id)||!Number.isFinite(item.start)||!Number.isFinite(item.end)||!Array.isArray(item.sources))throw new Error("Invalid investigation metadata.");
@@ -784,7 +785,7 @@ let timeSliceTimer=null;
 function applyTimeSlice(){
   clearTimeout(timeSliceTimer);timeSliceTimer=null;
   if(!state.run)return;
-  const level=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number($("time-slice-size").value)||10));
+  const level=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number($("time-slice-size").value)||DEFAULT_TIME_SLICE_LEVEL));
   if(level===state.timeSliceLevel)return;
   state.caseId=null;state.overviewPage=1;
   rebuildInvestigations();persistActiveAnalysis();
@@ -849,7 +850,7 @@ $("session-file").addEventListener("change",async()=>{
 });
 $("view-report").addEventListener("click",openReport);
 window.addEventListener("resize",()=>{clearTimeout(state.resizeTimer);state.resizeTimer=setTimeout(()=>{if(state.run&&!$("results-panel").hidden){if(state.caseId)renderModelEvidence();else renderOverview();}},150);});
-$("time-slice-size").value="10";
+$("time-slice-size").value=String(DEFAULT_TIME_SLICE_LEVEL);
 renderRoute();
 (async()=>{
   try{
