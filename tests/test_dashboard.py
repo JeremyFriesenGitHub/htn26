@@ -155,7 +155,7 @@ class RulesTests(unittest.TestCase):
         self.assertTrue(any(r["score"] >= .75 for r in rows))
         self.assertTrue(any(.25 <= r["score"] < .75 for r in rows))
         self.assertTrue(any(r["score"] < .25 for r in rows))
-        archive = [r for r in rows if r["user"] == "david_m" and
+        archive = [r for r in rows if r["user"] == "john_m" and
                    r["path"] == "/finance/reports/q1_draft_CONFIDENTIAL.zip"]
         self.assertEqual({r["status"] for r in archive}, {200, 403})
         self.assertEqual({r["ip"] for r in rows if r["user"] == "sarah_j"}, {"10.0.5.12", "10.0.8.45"})

@@ -6,6 +6,7 @@ const ICONS = {
   logs: '<path d="M5 5h14M5 12h10M5 19h14"/>',
   upload: '<path d="M12 16V3m-4 4 4-4 4 4M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/>',
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+  report: '<path d="M6 3h9l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm9 0v5h4M8 12h8M8 16h8"/>',
   download: '<path d="M12 3v12m-4-4 4 4 4-4M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/>',
   "arrow-down": '<path d="M12 4v16m-5-5 5 5 5-5"/>',
   x: '<path d="m6 6 12 12M6 18 18 6"/>',
@@ -13,23 +14,122 @@ const ICONS = {
 const icon = (name) => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 const escapeHTML = (value) => String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[char]));
 const number = (value) => Number(value).toLocaleString("en-US");
-const dateFormat = (timestamp, options) => new Intl.DateTimeFormat("en-US", {timeZone:"UTC", ...options}).format(new Date(timestamp));
+const dateFormat = (timestamp, options) => new Intl.DateTimeFormat("en-US", options).format(new Date(timestamp));
 const dayLabel = (time) => dateFormat(time, {month:"short", day:"numeric"});
 const timeLabel = (time) => dateFormat(time, {hour:"2-digit", minute:"2-digit", second:"2-digit", hourCycle:"h23"});
+const zoneLabel = (time) => new Intl.DateTimeFormat("en-US", {timeZoneName:"short"}).formatToParts(new Date(time)).find((part)=>part.type==="timeZoneName").value;
 const Investigation = window.LogInvestigation;
 const state = {
   ready:false,busy:false,reading:false,revision:0,inputMode:"file",file:null,models:[],
   run:null,source:"",synthetic:false,threshold:1,logs:"",rowsById:new Map(),
   runs:new Map(),activeModel:"",modelBusy:false,investigations:[],caseId:null,
   selection:null,edits:new Map(),dispositions:new Map(),eventNotes:new Map(),
-  query:"",account:"",overviewPage:1,episodeLimit:12,eventLimits:new Map(),includeContext:true,
+  query:"",account:"",overviewPage:1,timelineLimit:40,earlierLimit:12,relatedLimit:12,includeContext:true,
+  cacheKey:"",timeSliceLevel:10,timeSliceCustomized:false,sliceSpec:null,
 };
+const TIME_SLICE_TARGETS = [240,168,112,72,44,26,14,7,3,1];
 const defaultCutoff = () => 1;
 const isCandidate = (row) => Review.isCandidate(row,state.threshold);
-const shortTime = (time) => `${dayLabel(time)} ${timeLabel(time)} UTC`;
+const shortTime = (time) => `${dayLabel(time)} ${timeLabel(time)} ${zoneLabel(time)}`;
 const accountName = (value) => value && value !== "-" ? value : "Anonymous";
 const actionName = (row) => `${row.method} ${row.path}`;
-const scoreKindFor = (run,row) => run.score_kind === "triaged" ? (Number.isFinite(row.baseline_percentile)?"calibrated":"percentile") : run.score_kind;
+
+const ANALYSIS_CACHE_DATABASE = "trace-analysis-cache";
+const ANALYSIS_CACHE_STORE = "analyses";
+const ANALYSIS_CACHE_VERSION = 1;
+const ACTIVE_ANALYSIS_POINTER = "trace-active-analysis-v1";
+function cacheRequest(request) {
+  return new Promise((resolve,reject)=>{request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error||new Error("Browser storage failed."));});
+}
+function openAnalysisCache() {
+  return new Promise((resolve,reject)=>{
+    if(!window.indexedDB){reject(new Error("Browser analysis caching is unavailable."));return;}
+    const request=indexedDB.open(ANALYSIS_CACHE_DATABASE,ANALYSIS_CACHE_VERSION);
+    request.onupgradeneeded=()=>{
+      const database=request.result;
+      if(!database.objectStoreNames.contains(ANALYSIS_CACHE_STORE)){
+        const store=database.createObjectStore(ANALYSIS_CACHE_STORE,{keyPath:"key"});
+        store.createIndex("savedAt","savedAt");
+      }
+    };
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error||new Error("Browser analysis caching is unavailable."));
+  });
+}
+async function analysisCacheKey(logs,model) {
+  if(!window.crypto?.subtle)return "";
+  const digest=await window.crypto.subtle.digest("SHA-256",new TextEncoder().encode(logs));
+  const hash=Array.from(new Uint8Array(digest),(byte)=>byte.toString(16).padStart(2,"0")).join("");
+  return `v${ANALYSIS_CACHE_VERSION}:${model}:${hash}`;
+}
+async function packCachedAnalysis(value) {
+  const json=JSON.stringify(value);
+  if(typeof CompressionStream==="undefined")return {compressed:false,payload:json};
+  const payload=await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"))).blob();
+  return {compressed:true,payload};
+}
+async function unpackCachedAnalysis(record) {
+  if(!record)return null;
+  let text;
+  if(record.compressed){
+    if(typeof DecompressionStream==="undefined")return null;
+    text=await new Response(record.payload.stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  }else text=typeof record.payload==="string"?record.payload:await record.payload.text();
+  return {...record,...JSON.parse(text)};
+}
+async function pruneAnalysisCache(database,keep=4) {
+  await new Promise((resolve,reject)=>{
+    const transaction=database.transaction(ANALYSIS_CACHE_STORE,"readwrite"),store=transaction.objectStore(ANALYSIS_CACHE_STORE);
+    const countRequest=store.count();
+    countRequest.onsuccess=()=>{
+      let remaining=Math.max(0,countRequest.result-keep);
+      if(!remaining)return;
+      const cursorRequest=store.index("savedAt").openKeyCursor();
+      cursorRequest.onsuccess=()=>{
+        const cursor=cursorRequest.result;
+        if(!cursor||remaining<=0)return;
+        store.delete(cursor.primaryKey);remaining--;cursor.continue();
+      };
+    };
+    transaction.oncomplete=resolve;
+    transaction.onerror=()=>reject(transaction.error||new Error("Could not prune the browser cache."));
+    transaction.onabort=()=>reject(transaction.error||new Error("Could not prune the browser cache."));
+  });
+}
+async function writeCachedAnalysis(key,model,logs,result) {
+  if(!key)return;
+  const packed=await packCachedAnalysis({logs,result});
+  const database=await openAnalysisCache();
+  try{
+    await new Promise((resolve,reject)=>{
+      const transaction=database.transaction(ANALYSIS_CACHE_STORE,"readwrite");
+      transaction.objectStore(ANALYSIS_CACHE_STORE).put({key,model,savedAt:Date.now(),...packed});
+      transaction.oncomplete=resolve;
+      transaction.onerror=()=>reject(transaction.error||new Error("Could not cache this analysis."));
+      transaction.onabort=()=>reject(transaction.error||new Error("Could not cache this analysis."));
+    });
+    await pruneAnalysisCache(database);
+  }finally{database.close();}
+}
+async function readCachedAnalysis(key) {
+  if(!key)return null;
+  const database=await openAnalysisCache();
+  try{
+    const transaction=database.transaction(ANALYSIS_CACHE_STORE,"readonly");
+    return await unpackCachedAnalysis(await cacheRequest(transaction.objectStore(ANALYSIS_CACHE_STORE).get(key)));
+  }finally{database.close();}
+}
+function persistActiveAnalysis() {
+  if(!state.run)return;
+  try{
+    if(!state.cacheKey){sessionStorage.removeItem(ACTIVE_ANALYSIS_POINTER);return;}
+    sessionStorage.setItem(ACTIVE_ANALYSIS_POINTER,JSON.stringify({key:state.cacheKey,source:state.source,synthetic:state.synthetic,threshold:state.threshold,timeSliceLevel:state.timeSliceLevel,timeSliceCustomized:state.timeSliceCustomized}));
+  }catch{}
+}
+function activeAnalysisPointer() {
+  try{return JSON.parse(sessionStorage.getItem(ACTIVE_ANALYSIS_POINTER)||"null");}
+  catch{return null;}
+}
 
 async function api(path, options = {}) {
   let response;
@@ -121,9 +221,13 @@ function switchInput(mode) {
   $("load-sample").hidden = mode === "session";
   showError("analyze-error"); syncControls();
 }
-const routes = {investigations:"/", analyze:"/analyze", models:"/models"};
+const routes = {home:"/", investigations:"/investigations", analyze:"/analyze", models:"/models"};
+if("scrollRestoration" in history)history.scrollRestoration="manual";
 function routeTo(path, replace=false) {
-  if(location.pathname + location.search !== path) history[replace?"replaceState":"pushState"]({},"",path);
+  if(location.pathname + location.search !== path){
+    history[replace?"replaceState":"pushState"]({},"",path);
+    window.scrollTo(0,0);
+  }
 }
 function setView(view) {
   for (const link of document.querySelectorAll(".primary-nav [data-view]")) {
@@ -131,12 +235,15 @@ function setView(view) {
     else link.removeAttribute("aria-current");
   }
   $("models-panel").hidden = view !== "models";
+  $("home-panel").hidden = view !== "home";
   $("investigations-empty").hidden = view !== "investigations" || Boolean(state.run);
-  document.title = `Trace · ${{analyze:"Analyze logs",investigations:state.source||"Investigations",models:"Models"}[view]}`;
+  document.title = `Trace · ${{home:"Home",analyze:"Analyze logs",investigations:"Investigations",models:"Models"}[view]}`;
 }
 function renderRoute() {
   const path = location.pathname.replace(/\/$/, "") || "/";
-  if(path === "/analyze") {
+  if(path === "/") {
+    setView("home"); $("input-panel").hidden=true; $("results-panel").hidden=true;
+  } else if(path === "/analyze") {
     setView("analyze"); $("input-panel").hidden=false; $("results-panel").hidden=true;
     const mode=new URLSearchParams(location.search).get("input");
     switchInput(["file","paste","session"].includes(mode)?mode:"file");
@@ -144,11 +251,14 @@ function renderRoute() {
     setView("models"); $("input-panel").hidden=true; $("results-panel").hidden=true; renderModelCatalog();
   } else {
     setView("investigations"); $("input-panel").hidden=true; $("results-panel").hidden=!state.run;
-    $("resume-route").hidden=Boolean(state.run)||!path.startsWith("/investigations/");
     if(state.run) {
       const id=path.startsWith("/investigations/")?path.slice(16):null;
-      if(id&&caseById(id)) openCase(id,false);
-      else {state.caseId=null;state.selection=null;renderOverview();}
+      const formerCandidate=/^investigation-(\d+)$/.exec(id||"");
+      const item=id&&(caseById(id)||(formerCandidate&&state.investigations.find((entry)=>entry.candidateIds.includes(Number(formerCandidate[1])))));
+      if(item){
+        if(item.id!==id)routeTo(`/investigations/${encodeURIComponent(item.id)}`,true);
+        openCase(item.id,false);
+      }else {state.caseId=null;state.selection=null;renderOverview();}
     }
   }
 }
@@ -157,7 +267,7 @@ function navigate(view) {
   if(cutoffTimer!==null)applyCutoff();
   routeTo(routes[view]||"/"); renderRoute();
 }
-window.addEventListener("popstate",()=>{if(cutoffTimer!==null)applyCutoff();renderRoute();});
+window.addEventListener("popstate",()=>{if(cutoffTimer!==null)applyCutoff();renderRoute();window.scrollTo(0,0);});
 const servedModelDescriptions = {
   gmm: "The Gaussian mixture model learns the distribution of standardized request features. The challenge configuration uses four components with diagonal covariance. Requests with combinations of features that are uncommon in the training data receive higher anomaly scores.",
   ae: "The deep autoencoder ensemble learns to reconstruct request features using seven neural networks. Each network is trained with regularization and early stopping. The model averages normalized reconstruction errors, assigning higher scores to requests whose features differ from the patterns learned during training.",
@@ -178,7 +288,7 @@ $("model-catalog").addEventListener("click", (event) => {
 });
 function showInput() { navigate("analyze"); }
 function showResults() {
-  routeTo(state.caseId?`/investigations/${encodeURIComponent(state.caseId).replace(/%3A/gi,":")}`:"/");
+  routeTo(state.caseId?`/investigations/${encodeURIComponent(state.caseId).replace(/%3A/gi,":")}`:"/investigations");
   setView("investigations"); $("input-panel").hidden=true; $("results-panel").hidden=false;
   if(state.run) {if(state.caseId)renderWorkspace();else renderOverview();}
 }
@@ -187,9 +297,18 @@ function updateCutoffLabel() {
   $("cutoff-value").textContent=`${Number(value.toFixed(3))}%`;
   $("investigation-cutoff").setAttribute("aria-valuetext",`${value} percentile`);
 }
+function caseLineRange(item) {
+  let first=Infinity,last=-Infinity;
+  for(const id of item.candidateIds){first=Math.min(first,id);last=Math.max(last,id);}
+  if(first===Infinity)return "Investigation";
+  return first===last?`Line ${first}`:`Lines ${first} to ${last}`;
+}
 function caseTimeRange(item) {
-  const ids=new Set(item.candidateIds),rows=item.rows.filter((row)=>ids.has(row.id)).sort((a,b)=>a.time-b.time);
-  return `${shortTime(rows[0]?.time??item.start)} – ${shortTime(rows[rows.length-1]?.time??item.end)}`;
+  const start=shortTime(item.start);
+  if(item.start===item.end)return start;
+  return dayLabel(item.start)===dayLabel(item.end)&&zoneLabel(item.start)===zoneLabel(item.end)
+    ?`${dayLabel(item.start)} ${timeLabel(item.start)} – ${timeLabel(item.end)} ${zoneLabel(item.end)}`
+    :`${start} – ${shortTime(item.end)}`;
 }
 function fileSize(bytes) { return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
 function lineCount(logs) { return logs.split("\n").reduce((total, line) => total + (line.trim() ? 1 : 0), 0); }
@@ -211,6 +330,7 @@ async function readFile(file) {
     if (logs.includes("\0")) throw new Error("This looks like a binary file. Choose a plain-text access log.");
     state.file = {logs, name:file.name, size:file.size, lines:lineCount(logs), synthetic:false};
     renderFile();
+    if(state.ready&&$("model-select").value)await loadCachedUpload(logs,$("model-select").value,file.name,false);
   } catch (error) {
     if (revision === state.revision) showError("analyze-error", error instanceof TypeError ? "This file is not UTF-8 text. Choose a UTF-8 .log or .txt file." : error.message);
   } finally { if (revision === state.revision) { state.reading = false; syncControls(); } }
@@ -233,30 +353,72 @@ async function prepareRun(run) {
   run.rowsById=new Map(run.rows.map((row)=>[row.id,row]));
   return run;
 }
+async function activateAnalysis(result,{logs,model,source,synthetic=false,threshold=defaultCutoff(),cacheKey=""}) {
+  const run=await prepareRun(result);
+  state.run=run;state.logs=logs;state.source=source;state.synthetic=synthetic;
+  state.threshold=threshold;state.runs=new Map([[model,run]]);state.activeModel=model;state.cacheKey=cacheKey;
+  state.rowsById=run.rowsById;state.caseId=null;state.selection=null;state.edits=new Map();
+  state.dispositions=new Map();state.eventNotes=new Map();state.investigations=[];state.query="";state.account="";state.overviewPage=1;
+  $("investigation-search").value="";$("investigation-cutoff").value=String(Number((state.threshold*100).toFixed(5)));
+  updateCutoffLabel();
+  $("run-notice").textContent=[run.warning||"",run.external?"Shortlisted requests were sent to OpenAI for review.":""].filter(Boolean).join(" ");
+  $("run-notice").hidden=!$("run-notice").textContent;
+  rebuildInvestigations();
+}
+async function loadCachedUpload(logs,model,source,synthetic=false) {
+  let cacheKey,cached;
+  try{
+    updateProgress({stage:"file",message:"Checking this browser for an existing analysis."});
+    cacheKey=await analysisCacheKey(logs,model);
+    cached=await readCachedAnalysis(cacheKey);
+  }catch{return false;}
+  if(!cached?.result)return false;
+  updateProgress({stage:"display",message:"Loading the saved analysis from this browser."});
+  await activateAnalysis(cached.result,{logs,model,source,synthetic,cacheKey});
+  showResults();persistActiveAnalysis();toast("Loaded cached model results.");
+  return true;
+}
 async function analyze(logs,model,source,synthetic=false) {
   if(state.busy||state.reading||state.modelBusy)return;
   if(!logs.trim()){showError("analyze-error","Add at least one log line.");return;}
   state.busy=true;syncControls();showError("analyze-error");
   try {
-    const run=await prepareRun(await predictStream(logs,model));
-    state.run=run;state.logs=logs;state.source=source;state.synthetic=synthetic;
-    state.threshold=defaultCutoff(run);state.runs=new Map([[model,run]]);state.activeModel=model;
-    state.rowsById=run.rowsById;state.caseId=null;state.selection=null;state.edits=new Map();
-    state.dispositions=new Map();state.eventNotes=new Map();state.investigations=[];state.query="";state.account="";state.overviewPage=1;
-    $("investigation-search").value="";$("investigation-cutoff").value=String(Number((state.threshold*100).toFixed(5)));
-    updateCutoffLabel();
-    $("results-title").textContent=source;
-    $("run-description").textContent=`${number(run.rows.length)} requests · ${run.model_name}`;
-    $("run-notice").textContent=[run.warning||"",run.external?"Shortlisted requests were sent to OpenAI for review.":""].filter(Boolean).join(" ");
-    $("run-notice").hidden=!$("run-notice").textContent;
-    rebuildInvestigations();showResults();toast(`${number(state.investigations.length)} candidate investigations found.`);
+    updateProgress({stage:"file",message:"Checking this browser for an existing analysis."});
+    const cacheKey=await analysisCacheKey(logs,model);
+    let cached=null;
+    try{cached=await readCachedAnalysis(cacheKey);}catch{}
+    let result=cached?.result,fromCache=Boolean(result),cacheReady=fromCache;
+    if(!result){
+      result=await predictStream(logs,model);
+      updateProgress({stage:"display",message:"Saving these results in this browser."});
+      if(cacheKey)try{await writeCachedAnalysis(cacheKey,model,logs,result);cacheReady=true;}catch{}
+    }else updateProgress({stage:"display",message:"Loading the saved analysis from this browser."});
+    await activateAnalysis(result,{logs,model,source,synthetic,cacheKey:cacheReady?cacheKey:""});
+    showResults();persistActiveAnalysis();
+    toast(fromCache?"Loaded cached model results.":`${number(state.investigations.length)} candidate investigations found.`);
   } catch(error){showError("analyze-error",error.message);}
   finally{state.busy=false;syncControls();}
+}
+async function restoreActiveAnalysis() {
+  const pointer=activeAnalysisPointer();
+  if(!pointer?.key)return false;
+  let cached;
+  try{cached=await readCachedAnalysis(pointer.key);}catch{return false;}
+  if(!cached?.result||typeof cached.logs!=="string"||typeof cached.model!=="string")return false;
+  const threshold=Number.isFinite(pointer.threshold)&&pointer.threshold>=0&&pointer.threshold<=1?pointer.threshold:defaultCutoff(cached.result);
+  state.timeSliceCustomized=pointer.timeSliceCustomized===true;
+  $("time-slice-size").value=String(state.timeSliceCustomized?Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number(pointer.timeSliceLevel)||10)):10);
+  await activateAnalysis(cached.result,{logs:cached.logs,model:cached.model,source:String(pointer.source||"Cached analysis"),synthetic:Boolean(pointer.synthetic),threshold,cacheKey:pointer.key});
+  if(!state.models.some((model)=>model.id===cached.model))state.models.push({id:cached.model,name:state.run.model_name||cached.model,available:false});
+  return true;
 }
 function rebuildInvestigations(){
   const previous=state.investigations,previousEdits=new Map(state.edits),byCandidate=new Map(),previousById=new Map(previous.map((item)=>[item.id,item]));
   for(const item of previous)for(const id of item.candidateIds){if(!byCandidate.has(id))byCandidate.set(id,[]);byCandidate.get(id).push(item);}
-  const inherited=new Set(),rebuilt=Investigation.buildInvestigations(state.run.rows,{isCandidate});
+  const level=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number($("time-slice-size").value)||10));
+  state.timeSliceLevel=level;
+  state.sliceSpec=Investigation.timeSlices(state.run.rows,TIME_SLICE_TARGETS[level-1]);
+  const inherited=new Set(),rebuilt=Investigation.buildInvestigations(state.run.rows,{isCandidate,slices:state.sliceSpec});
   for(const item of rebuilt){
     item.reviewCutoff=state.threshold;
     const ancestors=new Map();
@@ -301,166 +463,134 @@ function editsFor(item){
 function candidateIds(item){return new Set(item.candidateIds);}
 function dispositionKey(row,caseId=state.caseId){return `${caseId}:${row.id}`;}
 function disposition(row,caseId=state.caseId){return state.dispositions.get(dispositionKey(row,caseId))||"";}
-function caseRows(item){return item.rows.filter((row)=>disposition(row)!=="excluded");}
-function episodeRows(episode){return episode.rows.filter((row)=>disposition(row)!=="excluded");}
+function caseRows(item){return item.rows;}
+function episodeRows(episode){return episode.rows;}
 function episodeLabel(episode){return episode.customLabel||episode.label||actionName(episode.rows[0]);}
-function caseProgression(item){
-  const ids=candidateIds(item),rows=item.rows.filter((row)=>ids.has(row.id));
-  const transitions=[];
-  for(const row of rows){const name=actionName(row);if(transitions[transitions.length-1]!==name)transitions.push(name);}
-  return transitions.length>3?[transitions[0],transitions[1],"…",transitions[transitions.length-1]]:transitions;
+function overviewMatches(){
+  const query=state.query.trim().toLowerCase();
+  return state.investigations.filter((item)=>(!query||[item.title||"",item.source||"",...item.sources,...item.rows.map((row)=>`${row.user} ${row.method} ${row.path} ${row.status}`)].join(" ").toLowerCase().includes(query)));
+}
+function renderOverviewActivity(matches=overviewMatches()){
+  if(!state.run||!$("overview-timeline-chart"))return;
+  const query=state.query.trim().toLowerCase(),ids=new Set(matches.flatMap((item)=>item.candidateIds));
+  const chartRows=state.run.rows.filter((row)=>(!query||ids.has(row.id)));
+  const slices=state.sliceSpec;
+  const chart=window.LogCharts.renderActivity($("overview-timeline-chart"),{rows:chartRows,targetBars:slices?.count||TIME_SLICE_TARGETS[state.timeSliceLevel-1],domainStart:slices?.start,domainEnd:slices?.end,thresholdPreview:true,isFlagged:(row)=>ids.has(row.id),showAll:$("show-other-traffic").checked,onSelect:(group)=>{
+    applyCutoff();
+    const match=state.investigations.find((item)=>item.start<group.end&&item.end>=group.start);if(match)openCase(match.id);
+  }});
+  state.activityChart=chart;
+  $("time-slice-value").textContent=chart.intervalLabel||"—";
 }
 function renderOverview(){
   if(!state.run)return;
   $("overview-panel").hidden=false;$("investigation-workspace").hidden=true;
-  const query=state.query.trim().toLowerCase();
   if($("overview-activity-title"))$("overview-activity-title").textContent=$("show-other-traffic").checked?"Requests around candidate investigations":"When candidate requests occurred";
-  const matches=state.investigations.filter((item)=>(!query||[item.title||"",item.account,...item.sources,...item.rows.map((row)=>`${row.method} ${row.path} ${row.status}`)].join(" ").toLowerCase().includes(query)));
+  const matches=overviewMatches();
   const pages=Math.max(1,Math.ceil(matches.length/8));state.overviewPage=Math.min(state.overviewPage,pages);
   const shown=matches.slice((state.overviewPage-1)*8,state.overviewPage*8);
-  $("overview-counts").textContent=`${number(matches.length)} candidate investigations · ${number(matches.reduce((sum,item)=>sum+item.candidateIds.length,0))} detector candidates · ${matches.some((item)=>item.grouping?.manual)?"includes analyst reconstructions":"grouped by account and time"}`;
-  $("investigation-list").innerHTML=shown.map((item)=>`<article class="investigation-card"><div class="investigation-card-heading"><div><h3>${escapeHTML(caseTimeRange(item))}</h3><p class="investigation-card-meta">${escapeHTML(accountName(item.account))}</p></div><button class="button primary" data-open-case="${escapeHTML(item.id)}">Open investigation</button></div><p class="investigation-card-meta">${number(item.candidateIds.length)} candidate requests · ${number(item.sources.length)} source IP${item.sources.length===1?"":"s"} · ${escapeHTML(item.sources.slice(0,3).join(", "))}${item.sources.length>3?" …":""}</p><p class="investigation-progression">${caseProgression(item).map(escapeHTML).join(' <span aria-hidden="true">→</span> ')}</p><p class="investigation-models">${item.savedOnly?"Saved analyst reconstruction at its original cutoff. ":""}${item.grouping?.manual?"Analyst reconstruction; detector scores are supporting evidence.":`Detected by ${escapeHTML(state.run.model_name)}.`} ${number(item.rows.length-item.candidateIds.length)} ${item.grouping?.manual?"additional evidence records":"nearby requests available as context"}.</p></article>`).join("");
+  $("overview-counts").textContent=`${number(matches.length)} candidate investigation${matches.length===1?"":"s"}`;
+  $("investigation-list").innerHTML=shown.map((item)=>{
+    return `<article class="investigation-card"><div class="investigation-card-heading"><div><h3>${escapeHTML(caseTimeRange(item))}</h3><p class="investigation-card-meta">${escapeHTML(caseLineRange(item))} · ${number(item.candidateIds.length)} candidate request${item.candidateIds.length===1?"":"s"}</p></div><button class="button primary" data-open-case="${escapeHTML(item.id)}">Open investigation</button></div></article>`;
+  }).join("");
   $("overview-empty").hidden=matches.length>0;$("overview-empty").textContent=state.investigations.length?"No investigations match your search.":"No requests meet this cutoff. Lower it to broaden the investigation.";
   $("overview-page").textContent=`${state.overviewPage} / ${pages}`;$("overview-previous").disabled=state.overviewPage<=1;$("overview-next").disabled=state.overviewPage>=pages;
-  if($("overview-timeline-chart")){
-    const ids=new Set(matches.flatMap((item)=>item.candidateIds));
-    const chartRows=state.run.rows.filter((row)=>(!query||ids.has(row.id)));
-    const chart=window.LogCharts.renderActivity($("overview-timeline-chart"),{rows:chartRows,thresholdPreview:true,isFlagged:(row)=>ids.has(row.id),showAll:$("show-other-traffic").checked,onSelect:(group)=>{
-      applyCutoff();
-      const match=state.investigations.find((item)=>item.start<group.end&&item.end>=group.start);if(match)openCase(match.id);
-    }});
-    state.activityChart=chart;
-    $("overview-chart-caption").textContent=chart.caption.replace("view its requests","open a matching investigation");
-  }
+  renderOverviewActivity(matches);
 }
 function openCase(id, push=true){
-  const item=caseById(id);if(!item)return;state.caseId=item.id;state.episodeLimit=12;state.eventLimits=new Map();
+  const item=caseById(id);if(!item)return;state.caseId=item.id;state.timelineLimit=40;state.earlierLimit=12;state.relatedLimit=12;
+  $("baseline-content").closest("details").open=false;
   const episodes=editsFor(item).episodes;const first=episodes.find((episode)=>episode.rows.some(isCandidate))||episodes[0];
-  state.selection=first?{type:"episode",id:first.id}:null;
+  const firstRequest=first?.rows.find(isCandidate)||first?.rows[0];
+  state.selection=firstRequest?{type:"event",id:firstRequest.id}:null;
   if(push)routeTo(`/investigations/${encodeURIComponent(item.id).replace(/%3A/gi,":")}`);
-  renderWorkspace();$("investigation-title").focus({preventScroll:true});$("investigation-workspace").scrollIntoView({block:"start"});
+  renderWorkspace();persistActiveAnalysis();$("investigation-title").focus({preventScroll:true});
 }
 function renderWorkspace(){
   const item=caseById();if(!item)return;
   $("overview-panel").hidden=true;$("investigation-workspace").hidden=false;
-  const retained=caseRows(item),ids=candidateIds(item),candidates=retained.filter((row)=>ids.has(row.id)),candidateSources=new Set(candidates.map((row)=>row.ip));
-  $("investigation-title").textContent=caseTimeRange(item);
+  $("investigation-title").textContent=caseLineRange(item);
   $("investigation-title").setAttribute("tabindex","-1");
-  const observedSources=[...new Set(retained.map((row)=>row.ip))],observedAccounts=[...new Set(retained.map((row)=>accountName(row.user)))];
-  $("investigation-meta").textContent=`${item.grouping?.manual?"Reconstruction window":"Candidate window"}: ${shortTime(item.start)} – ${shortTime(item.end)} · Evidence sources: ${observedSources.join(", ")}`;
-  const first=candidates[0],last=candidates[candidates.length-1];
-  const candidateAccounts=[...new Set(candidates.map((row)=>accountName(row.user)))];
-  const candidateSubject=item.grouping?.manual?`${candidateAccounts.join(", ")||"This reconstruction"} ${candidateAccounts.length>1?"have":"has"}`:`${accountName(item.account)} has`;
-  $("investigation-summary").innerHTML=`<span class="evidence-kind">Observed</span><p>${escapeHTML(candidateSubject)} ${number(candidates.length)} retained candidate requests associated with ${number(candidateSources.size)} source IP${candidateSources.size===1?"":"s"}. ${first?`The candidate sequence starts with <button class="text-button" data-select-event="${first.id}">${escapeHTML(actionName(first))}</button> (HTTP ${first.status})${last!==first?` and ends with <button class="text-button" data-select-event="${last.id}">${escapeHTML(actionName(last))}</button> (HTTP ${last.status})`:""}.`:"All candidate requests have been removed from this reconstruction."}</p><p class="field-hint">Evidence participants: ${escapeHTML(observedAccounts.join(", "))}. ${item.addedIds?.size?`${item.addedIds.size} history records explicitly added by the analyst. `:""}${escapeHTML(state.run.model_name)} supplied the candidate set. ${item.grouping?.manual?"The analyst linked these records; the proposed relationship is not an independently confirmed incident.":"Grouping proposes a relationship; it does not confirm an incident."}</p>`;
-  if(item.summary?.narrative)$("investigation-summary").insertAdjacentHTML("beforeend",`<p><span class="evidence-kind">Analyst reconstruction</span> ${escapeHTML(item.summary.narrative)}</p>`);
-  $("grouping-note").textContent=item.grouping?.manual?String(item.grouping.note||"Manually reconstructed by the analyst from linked evidence."):"Authenticated requests are linked by account, including source changes. Anonymous requests are linked by IP. A gap over 30 minutes between candidates starts another investigation. Context includes the same actor’s requests up to 5 minutes before and after. Episode boundaries follow request method, target, and time proximity—not inferred attack stages.";
-  $("add-investigation-note").value=editsFor(item).note;$("include-context").checked=state.includeContext;
-  $("restore-events").disabled=!item.rows.some((row)=>disposition(row)==="excluded");
-  renderEpisodes();renderBaseline();renderEvidence();
-  const comparison=state.baseline;
-  $("investigation-summary").insertAdjacentHTML("beforeend",`<p class="field-hint"><span class="evidence-kind">Upload comparison</span> ${comparison.earlier.length?`${number(comparison.newSources.length)} source IPs and ${number(comparison.newPaths.length)} targets in the candidate window were absent from ${number(comparison.earlier.length)} earlier requests for this actor.`:"No earlier requests for this actor are available in this upload; usual behavior cannot be established here."} <button class="text-button" data-open-baseline>Inspect comparison and evidence</button></p>`);
+  $("add-investigation-note").value=editsFor(item).note;
+  renderTimeline();renderBaseline();renderEvidence();
 }
-function visibleEpisodes(){
-  const item=caseById();if(!item)return[];const ids=candidateIds(item);
-  return editsFor(item).episodes.filter((episode)=>episodeRows(episode).some((row)=>state.includeContext||ids.has(row.id)||["important","promoted"].includes(disposition(row))));
+function timelineRows(){
+  const item=caseById();if(!item)return[];
+  return editsFor(item).episodes.flatMap(episodeRows).sort((a,b)=>a.time-b.time||a.id-b.id);
 }
-function renderEpisodes(){
-  const item=caseById(),ids=candidateIds(item),episodes=visibleEpisodes();
-  const selectedEpisode=state.selection?.type==="episode"?state.selection.id:episodes.find((episode)=>episode.rows.some((row)=>row.id===state.selection?.id))?.id;
-  const selectedIndex=episodes.findIndex((episode)=>episode.id===selectedEpisode);if(selectedIndex>=state.episodeLimit)state.episodeLimit=selectedIndex+1;
-  $("episode-list").innerHTML=episodes.slice(0,state.episodeLimit).map((episode,index)=>{
-    const rows=episodeRows(episode).filter((row)=>state.includeContext||ids.has(row.id)||["important","promoted"].includes(disposition(row)));
-    const limit=state.eventLimits.get(episode.id)||30,shown=rows.slice(0,limit),count=rows.filter((row)=>ids.has(row.id)).length;
-    const statuses=[...new Set(rows.map((row)=>row.status))];
-    return `<details class="episode ${episode.id===selectedEpisode?"selected":""}" data-episode="${escapeHTML(episode.id)}" ${episode.id===selectedEpisode?"open":""}><summary class="episode-summary"><span class="episode-time">${shortTime(rows[0].time)}${rows.length>1?` – ${shortTime(rows[rows.length-1].time)}`:""}</span><span class="episode-title">${escapeHTML(episodeLabel(episode))}</span><span class="episode-meta">${number(rows.length)} requests · ${number(count)} candidates · HTTP ${statuses.join(", ")}${episode.customLabel?" · Analyst label":""}</span></summary><div class="episode-actions"><button class="text-button" data-select-episode="${escapeHTML(episode.id)}">Model evidence for episode</button><button class="text-button" data-rename-episode="${escapeHTML(episode.id)}">Rename</button><button class="text-button" data-merge-episode="${escapeHTML(episode.id)}" ${index>=episodes.length-1?"disabled":""}>Merge with next</button></div><div class="event-list">${shown.map((row)=>`<button class="event-row ${ids.has(row.id)?"candidate":"context"} ${disposition(row)} ${state.selection?.type==="event"&&state.selection.id===row.id?"selected":""}" data-select-event="${row.id}" aria-pressed="${state.selection?.type==="event"&&state.selection.id===row.id}"><span class="event-time">${timeLabel(row.time)}</span><span class="event-request">${escapeHTML(actionName(row))}<small>${escapeHTML(row.ip)} · line ${row.id}${disposition(row)?` · Analyst: ${escapeHTML(disposition(row))}`:ids.has(row.id)?" · Candidate":" · Context"}</small></span><span class="event-result">${row.status}</span></button>`).join("")}</div>${rows.length>shown.length?`<button class="text-button show-more" data-more-events="${escapeHTML(episode.id)}">Show ${Math.min(30,rows.length-shown.length)} more requests (${number(rows.length)} total)</button>`:""}</details>`;
-  }).join("")||'<p class="empty-state">No retained events in this view. Include context or restore removed events.</p>';
-  if(episodes.length>state.episodeLimit)$("episode-list").insertAdjacentHTML("beforeend",`<button class="button secondary" data-more-episodes>Show more episodes (${number(episodes.length)} total)</button>`);
+function highlightedRequest(row){return Review.isCandidate(row,caseCutoff())||disposition(row)==="important";}
+function renderTimeline(){
+  const rows=timelineRows();
+  const selectedIndex=rows.findIndex((row)=>row.id===state.selection?.id);
+  if(selectedIndex>=state.timelineLimit)state.timelineLimit=selectedIndex+1;
+  $("timeline-list").innerHTML=rows.slice(0,state.timelineLimit).map((row)=>`<button class="event-row ${highlightedRequest(row)?"candidate":"context"} ${disposition(row)}" data-select-event="${row.id}"><span class="event-time">${dayLabel(row.time)}<br>${timeLabel(row.time)} ${zoneLabel(row.time)}</span><span class="event-request">${escapeHTML(actionName(row))}<small>${escapeHTML(row.ip)} · line ${row.id}${disposition(row)?` · ${escapeHTML(disposition(row))}`:""}</small><code class="event-raw">${escapeHTML(row.raw)}</code></span><span class="event-result">${row.status}</span></button>`).join("")||'<p class="empty-state">No requests.</p>';
+  if(rows.length>state.timelineLimit)$("timeline-list").insertAdjacentHTML("beforeend",`<button class="button secondary" data-more-requests>Show ${number(Math.min(40,rows.length-state.timelineLimit))} more requests</button>`);
 }
 function selectEvent(id){
   if(!state.rowsById.has(id))return;
+  if(state.selection?.id!==id){state.earlierLimit=12;state.relatedLimit=12;$("baseline-content").closest("details").open=false;}
   state.selection={type:"event",id};
-  const episode=editsFor(caseById()).episodes.find((item)=>item.rows.some((row)=>row.id===id));
-  if(episode){const index=episode.rows.findIndex((row)=>row.id===id);state.eventLimits.set(episode.id,Math.max(30,index+1));}
-  renderEpisodes();renderEvidence();
+  renderTimeline();renderBaseline();renderEvidence();
   revealSelection();
 }
 function revealSelection(){
-  $("evidence-workspace").scrollTop=0;
   if(window.matchMedia("(max-width: 850px)").matches){$("evidence-workspace").scrollIntoView({block:"start"});$("evidence-heading").setAttribute("tabindex","-1");$("evidence-heading").focus({preventScroll:true});}
-  else if(state.selection?.type==="event")$("episode-list").querySelector(`[data-select-event="${state.selection.id}"]`)?.scrollIntoView({block:"nearest"});
+  else if(state.selection?.type==="event")$("timeline-list").querySelector(`[data-select-event="${state.selection.id}"]`)?.scrollIntoView({block:"nearest"});
 }
 function selectedRows(){
-  if(!state.selection)return[];
-  if(state.selection.type==="event")return[state.rowsById.get(state.selection.id)].filter(Boolean);
-  const episode=editsFor(caseById()).episodes.find((item)=>item.id===state.selection.id);
-  return episode?episodeRows(episode):[];
+  if(state.selection?.type!=="event")return[];
+  return[state.rowsById.get(state.selection.id)].filter(Boolean);
 }
 function evidenceFields(fields){return `<dl class="evidence-fields">${fields.map(([label,value])=>`<div><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd></div>`).join("")}</dl>`;}
-function relatedButtons(rows){return rows.map((row)=>`<button class="event-row context" data-select-event="${row.id}"><span class="event-time">${shortTime(row.time)}</span><span class="event-request">${escapeHTML(actionName(row))}<small>${escapeHTML(accountName(row.user))} · ${escapeHTML(row.ip)}</small></span><span class="event-result">${row.status}</span></button>`).join("");}
+function flaggedReasons(row){
+  const run=state.runs.get(state.activeModel)||state.run,scored=run?.rowsById.get(row.id)||row;
+  const reasons=[...new Set(scored.reasons||scored.signals||[])].filter((reason)=>reason&&reason!=="failed-login"&&!/^\d+-(?:prior-)?failed-logins-in-60s$/.test(String(reason)));
+  if(!reasons.length)return "";
+  const label=(reason)=>window.LogModelLens.signalLabel?.(reason)||String(reason).replace(/-/g," ").replace(/^./,(letter)=>letter.toUpperCase());
+  return `<section class="request-reasons"><h4>Why it was flagged</h4><ul>${reasons.map((reason)=>`<li>${escapeHTML(label(reason))}</li>`).join("")}</ul></section>`;
+}
+function relatedButtons(rows){return rows.map((row)=>`<button class="event-row ${highlightedRequest(row)?"candidate":"context"}" data-select-event="${row.id}"><span class="event-time">${shortTime(row.time)}</span><span class="event-request">${escapeHTML(actionName(row))}<small>${escapeHTML(accountName(row.user))} · ${escapeHTML(row.ip)}</small></span><span class="event-result">${row.status}</span></button>`).join("");}
+function earlierFor(row){
+  return state.run.rows.filter((entry)=>entry.ip===row.ip&&entry.user===row.user&&(entry.time<row.time||(entry.time===row.time&&entry.id<row.id)));
+}
+function endpoint(row){return String(row.path||"").split("?",1)[0];}
+function relatedEarlierFor(row, earlier){
+  const target=endpoint(row),cutoff=caseCutoff();
+  return earlier.filter((entry)=>endpoint(entry)===target||Review.isCandidate(entry,cutoff));
+}
+function relatedHistory(row){return relatedEarlierFor(row,earlierFor(row)).sort((a,b)=>b.time-a.time||b.id-a.id);}
 function renderEvidence(){
   const item=caseById(),rows=selectedRows();if(!item)return;
-  $("evidence-heading").textContent=state.selection?.type==="event"?`${item.rows.some((row)=>row.id===state.selection.id)?"Event":"Outside investigation · history"} · line ${state.selection.id}`:"Episode evidence";
-  if(!rows.length){$("evidence-content").innerHTML='<p class="empty-state">Select an episode or event in the timeline.</p>';renderModelEvidence();return;}
-  if(state.selection.type==="event"){
-    const row=rows[0],ids=candidateIds(item),dispositionValue=disposition(row),inCase=item.rows.some((entry)=>entry.id===row.id),analystAdded=Boolean(item.addedIds?.has(row.id));
-    const sameActor=state.run.rows.filter((entry)=>entry.user===row.user&&(row.user!=="-"||entry.ip===row.ip)).sort((a,b)=>a.time-b.time||a.id-b.id);
-    const index=sameActor.findIndex((entry)=>entry.id===row.id),nearby=sameActor.slice(Math.max(0,index-3),index+4).filter((entry)=>entry.id!==row.id);
-    const episode=editsFor(item).episodes.find((entry)=>entry.rows.some((entryRow)=>entryRow.id===row.id));
-    const splitAllowed=episode&&episode.rows.findIndex((entry)=>entry.id===row.id)>0;
-    $("evidence-content").innerHTML=`<span class="evidence-kind">Observed fields</span>${evidenceFields([["Account",accountName(row.user)],["Source IP",row.ip],["Target",actionName(row)],["Time",shortTime(row.time)],["HTTP result",row.status],["Response bytes",number(row.bytes)]])}<details class="evidence-section"><summary>Why this event is included</summary><p>${ids.has(row.id)?`Its ${escapeHTML(state.run.model_name)} result met the ${Number((caseCutoff(item)*100).toFixed(5))}${state.run.mode==="heuristic"?" / 100 rule-score":" percentile"} review cutoff.`:analystAdded?"The analyst explicitly added this history record to the reconstruction.":inCase?"It is nearby traffic for the same actor, provided as context.":"This record is outside the investigation. It was opened from observed history; promote it explicitly to include it in the reconstruction."} ${dispositionValue?`Analyst disposition: ${escapeHTML(dispositionValue)}.`:""} This relationship does not establish causation.</p></details><div class="evidence-actions"><label>Analyst disposition<select id="event-disposition"><option value="">Unreviewed</option><option value="important">Important</option><option value="benign">Benign</option><option value="promoted">Promote to timeline</option><option value="excluded" ${inCase?"":"disabled"}>Remove from reconstruction</option></select></label><button class="text-button" data-split-event="${row.id}" ${splitAllowed?"":"disabled"}>Start new episode here</button></div><label class="evidence-note">Event note <span class="analyst-label">Analyst interpretation</span><textarea id="event-note" rows="2" placeholder="Record your interpretation and supporting evidence.">${escapeHTML(state.eventNotes.get(row.id)||"")}</textarea></label><details class="evidence-section" open><summary>Surrounding account activity (${nearby.length} requests)</summary><div class="related-events">${relatedButtons(nearby)||'<p>No surrounding requests in this upload.</p>'}</div></details><details class="evidence-section"><summary>Source and target history in this upload</summary><p>Earlier requests sharing this source or exact target; these are observations, not a learned baseline.</p><div class="related-events">${relatedButtons(state.run.rows.filter((entry)=>entry.time<row.time&&(entry.ip===row.ip||entry.path===row.path)).sort((a,b)=>b.time-a.time).slice(0,8))||'<p>No earlier matching requests.</p>'}</div></details><details class="evidence-section"><summary>Original log record</summary><pre class="raw-log">${escapeHTML(row.raw)}</pre></details>`;
+  $("evidence-heading").textContent=rows[0]?actionName(rows[0]):"Select a request";
+  if(!rows.length){$("evidence-content").innerHTML='<p class="empty-state">Select a request to inspect its fields and history.</p>';renderModelEvidence();return;}
+  {
+    const row=rows[0],dispositionValue=disposition(row);
+    const history=relatedHistory(row);
+    const historySection=history.length?`<details class="evidence-section"><summary>Earlier related activity (${number(history.length)})</summary><div class="related-events">${relatedButtons(history.slice(0,state.relatedLimit))}</div>${history.length>state.relatedLimit?`<button class="text-button show-more" data-more-related>Show ${number(Math.min(20,history.length-state.relatedLimit))} more requests</button>`:""}</details>`:"";
+    $("evidence-content").innerHTML=`${flaggedReasons(row)}${evidenceFields([["Account",accountName(row.user)],["Source IP",row.ip],["Time",shortTime(row.time)],["HTTP status",row.status]])}<div class="evidence-actions"><label>Disposition<select id="event-disposition"><option value="">Unreviewed</option><option value="important">Important</option><option value="benign">Benign</option></select></label></div><label class="evidence-note">Request note<textarea id="event-note" rows="2" placeholder="Add your interpretation. This note will be added to the report.">${escapeHTML(state.eventNotes.get(row.id)||"")}</textarea></label>${historySection}`;
     $("event-disposition").value=dispositionValue;
-  }else{
-    const episode=editsFor(item).episodes.find((entry)=>entry.id===state.selection.id);
-    const counts=new Map();for(const row of rows)counts.set(row.status,(counts.get(row.status)||0)+1);
-    $("evidence-content").innerHTML=`<span class="evidence-kind">Observed episode</span><h4>${escapeHTML(episodeLabel(episode))}</h4>${evidenceFields([["Time",`${shortTime(rows[0].time)} – ${shortTime(rows[rows.length-1].time)}`],["Requests",number(rows.length)],["Sources",[...new Set(rows.map((row)=>row.ip))].join(", ")],["HTTP results",[...counts].map(([status,count])=>`${status}: ${count}`).join(" · ")]])}<p class="field-hint">${episode.customLabel?"The episode title was supplied by the analyst.":"This episode groups nearby requests to the same target. Its title is the observed method and path."}</p><p class="field-hint">Select a request for its parsed fields, neighboring traffic, and original log.</p>`;
   }
   renderModelEvidence();
 }
 function renderModelEvidence(){
-  const rows=selectedRows(),run=state.runs.get(state.activeModel);
-  $("evidence-model").innerHTML=state.models.filter((model)=>model.available||state.runs.has(model.id)).map((model)=>`<option value="${escapeHTML(model.id)}" ${model.available||state.runs.has(model.id)?"":"disabled"}>${escapeHTML(model.name)}${state.runs.has(model.id)?" · analyzed":model.available?" · not run":" · unavailable"}</option>`).join("");
-  $("evidence-model").value=state.activeModel;$("evidence-model").disabled=state.modelBusy;
-  if(run){
-    const selected=rows.map((row)=>run.rowsById.get(row.id)).filter(Boolean);
-    window.LogModelLens.render($("model-evidence-content"),{run,selectedRows:selected,allRows:run.rows,cutoff:run===state.run?caseCutoff():defaultCutoff(run),onSelectEvent:selectEvent});
-  }else{
-    const model=state.models.find((entry)=>entry.id===state.activeModel);
-    $("model-evidence-content").innerHTML=`<p>This detector has not analyzed this upload. Your investigation and selection stay in place.</p>${model?.external||model?.id==="hybrid"?'<p class="field-hint">This option sends shortlisted logs and account profiles to OpenAI.</p>':""}<button id="run-evidence-model" class="button primary" ${state.modelBusy?"disabled":""}>${state.modelBusy?"Analyzing…":"Analyze this upload with "+escapeHTML(model?.name||state.activeModel)}</button>`;
-  }
-    $("model-comparison").innerHTML=`<h4>Detector perspectives</h4><p class="field-hint">Same selected ${rows.length===1?"event":"events"}; separate cutoffs. Agreement is not independent confirmation.</p><div class="model-comparison-list">${state.models.filter((model)=>model.available||state.runs.has(model.id)).map((model)=>{
-    const scoredRun=state.runs.get(model.id),matched=scoredRun?rows.map((row)=>scoredRun.rowsById.get(row.id)).filter(Boolean):[];
-    const cutoff=scoredRun===state.run?caseCutoff():scoredRun?defaultCutoff(scoredRun):null;
-    const flagged=matched.filter((row)=>Review.isCandidate(row,cutoff)).length;
-    return `<button class="model-comparison-row" data-lens="${escapeHTML(model.id)}" ${model.available||scoredRun?"":"disabled"} aria-pressed="${state.activeModel===model.id}"><span>${escapeHTML(model.name)}</span><span>${!scoredRun?(model.available?"Not run":"Unavailable"):!matched.length?"No selected events":`${flagged} / ${matched.length} above cutoff`}</span></button>`;
-  }).join("")}</div>`;
-}
-async function runEvidenceModel(){
-  if(state.modelBusy||!state.run)return;
-  const model=state.activeModel,revision=state.revision,originalRun=state.run;
-  state.modelBusy=true;renderModelEvidence();
-  try{
-    const run=await prepareRun(await predictStream(state.logs,model,(progress)=>{
-      $("model-run-status").textContent=`${progress.message||progress.stage||"Processing"}${Number.isFinite(progress.completed)&&progress.total?` · ${number(progress.completed)} / ${number(progress.total)}`:""}`;
-    }));
-    if(revision!==state.revision||state.run!==originalRun)return;
-    if(run.rows.length!==originalRun.rows.length||run.rows.some((row)=>originalRun.rowsById.get(row.id)?.raw!==row.raw))throw new Error("The detector returned records that do not match this upload. Its results were not attached.");
-    state.runs.set(model,run);$("model-run-status").textContent=`${run.model_name} complete. Selection and reconstruction preserved.`;
-  }catch(error){$("model-run-status").textContent=error.message;}
-  finally{state.modelBusy=false;renderModelEvidence();}
+  const rows=selectedRows(),run=state.runs.get(state.activeModel)||state.run;
+  const selected=rows.map((row)=>run.rowsById.get(row.id)).filter(Boolean);
+  const host=$("model-evidence-content");
+  window.LogModelLens.render(host,{run,selectedRows:selected,allRows:run.rows,cutoff:run===state.run?caseCutoff():defaultCutoff(run),onSelectEvent:selectEvent});
+  host.closest(".model-workspace").hidden=!host.childNodes.length&&!$("model-run-status").textContent;
 }
 function renderBaseline(){
   const item=caseById();if(!item)return;
-  const sameActor=(row)=>row.user===item.account&&(item.account!=="-"||item.sources.includes(row.ip));
-  const earlier=state.run.rows.filter((row)=>sameActor(row)&&row.time<item.start);
-  const during=state.run.rows.filter((row)=>sameActor(row)&&row.time>=item.start&&row.time<=item.end);
-  let priorStart=Infinity;for(const row of earlier)priorStart=Math.min(priorStart,row.time);
-  const earlierSources=new Set(earlier.map((row)=>row.ip)),earlierPaths=new Set(earlier.map((row)=>row.path));
-  const caseSources=[...new Set(during.map((row)=>row.ip))],casePaths=[...new Set(during.map((row)=>row.path))];
-  const beforeMinutes=earlier.length?(item.start-priorStart)/60000:0,caseMinutes=(item.end-item.start)/60000;
-  const priorRate=beforeMinutes>0?earlier.length/beforeMinutes:null,caseRate=caseMinutes>0?during.length/caseMinutes:null;
-  state.baseline={earlier,during,priorStart,beforeMinutes,caseMinutes,priorRate,caseRate,newSources:caseSources.filter((ip)=>!earlierSources.has(ip)),newPaths:casePaths.filter((path)=>!earlierPaths.has(path))};
-  const priorWindow=earlier.length?`${shortTime(priorStart)} to ${shortTime(item.start)} (end exclusive)`:"No earlier account traffic in this upload";
-  $("baseline-content").innerHTML=`<span class="evidence-kind">Statistical comparison · this upload only</span><p class="field-hint">Earlier traffic is observed history, not verified normal behavior or the model’s training baseline.</p><div class="table-scroll"><table class="baseline-table"><thead><tr><th>Observation</th><th>Earlier in upload</th><th>Investigation window</th></tr></thead><tbody><tr><th>Window (UTC)</th><td>${priorWindow}</td><td>${shortTime(item.start)} to ${shortTime(item.end)}</td></tr><tr><th>Requests</th><td>${number(earlier.length)}</td><td>${number(during.length)}</td></tr><tr><th>Requests / minute</th><td>${priorRate===null?"Not enough time coverage":priorRate.toFixed(2)}${beforeMinutes?` over ${beforeMinutes.toFixed(2)} min`:""}</td><td>${caseRate===null?"Single timestamp; rate unavailable":caseRate.toFixed(2)}${caseMinutes?` over ${caseMinutes.toFixed(2)} min`:""}</td></tr><tr><th>Source IPs</th><td>${escapeHTML([...earlierSources].slice(0,6).join(", ")||"Not observed")}${earlierSources.size>6?` +${earlierSources.size-6}`:""}</td><td>${escapeHTML(caseSources.slice(0,6).join(", "))}${caseSources.length>6?` +${caseSources.length-6}`:""}${earlier.length?` · ${state.baseline.newSources.length} absent from earlier traffic`:""}</td></tr><tr><th>Distinct targets</th><td>${number(earlierPaths.size)}</td><td>${number(casePaths.length)}${earlier.length?` · ${state.baseline.newPaths.length} absent from earlier traffic`:""}</td></tr></tbody></table></div><details class="evidence-section"><summary>Supporting earlier requests (${number(earlier.length)})</summary><p class="field-hint">${earlier.length>20?"20 most recent shown; the report includes the full earlier comparison record IDs.":""}</p><div class="related-events">${relatedButtons(earlier.slice().sort((a,b)=>b.time-a.time).slice(0,20))||'<p>No earlier records. No claim about usual behavior can be made from this upload.</p>'}</div></details>`;
+  const row=selectedRows()[0];
+  const earlier=row?earlierFor(row).sort((a,b)=>b.time-a.time||b.id-a.id):[];
+  const panel=$("baseline-content").closest("details");
+  panel.hidden=!earlier.length||relatedEarlierFor(row,earlier).length===earlier.length;
+  panel.querySelector("summary").textContent=`Earlier requests (${number(earlier.length)})`;
+  if(panel.hidden){
+    $("baseline-content").replaceChildren();
+    return;
+  }
+  $("baseline-content").innerHTML=`<div class="related-events">${relatedButtons(earlier.slice(0,state.earlierLimit))}</div>${earlier.length>state.earlierLimit?`<button class="text-button show-more" data-more-earlier>Show ${number(Math.min(20,earlier.length-state.earlierLimit))} more requests</button>`:""}`;
 }
 function saveFile(name,body,type){
   const url=URL.createObjectURL(new Blob([body],{type})),link=document.createElement("a");
@@ -479,7 +609,7 @@ function sessionSnapshot(){
     })};
   });
   return {schema:"log-order-investigation",version:1,saved_at:new Date().toISOString(),source:state.source,synthetic:state.synthetic,
-    base_model:state.run.model,active_model:state.activeModel,threshold:state.threshold,rows:state.run.rows.map(record),runs,
+    base_model:state.run.model,active_model:state.activeModel,threshold:state.threshold,time_slice_level:state.timeSliceLevel,rows:state.run.rows.map(record),runs,
     investigations:state.investigations.map((item)=>{const {rows,episodes,addedIds,...saved}=item;return {...saved,rowIds:rows.map((row)=>row.id),episodes:episodes.map(episode),addedIds:[...(addedIds||[])]};}),
     edits:[...state.edits].map(([id,value])=>[id,{...value,episodes:value.episodes.map(episode)}]),
     dispositions:[...state.dispositions],eventNotes:[...state.eventNotes],caseId:state.caseId,selection:state.selection,
@@ -510,107 +640,98 @@ async function restoreSession(saved){
   const rowRefs=(rowIds)=>{if(!Array.isArray(rowIds)||rowIds.some((id)=>!run.rowsById.has(id)))throw new Error("The timeline refers to missing records.");return rowIds.map((id)=>run.rowsById.get(id));};
   const episode=(item)=>{if(!safeId(item.id))throw new Error("Invalid episode identifier.");const rows=rowRefs(item.rowIds);if(!rows.length)throw new Error("An episode has no records.");return {...item,rows,start:rows[0].time,end:rows[rows.length-1].time};};
   const threshold=Number.isFinite(saved.threshold)&&saved.threshold>=0&&saved.threshold<=1?saved.threshold:defaultCutoff(run);
+  const timeSliceLevel=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number(saved.time_slice_level)||10));
+  const sliceSpec=Investigation.timeSlices(run.rows,TIME_SLICE_TARGETS[timeSliceLevel-1]);
   const investigations=saved.investigations? saved.investigations.map((item)=>{
     if(!safeId(item.id)||!Number.isFinite(item.start)||!Number.isFinite(item.end)||!Array.isArray(item.sources))throw new Error("Invalid investigation metadata.");
     rowRefs(item.candidateIds);return {...item,rows:rowRefs(item.rowIds),episodes:item.episodes.map(episode),addedIds:new Set(item.addedIds||[])};
-  }):Investigation.buildInvestigations(run.rows,{isCandidate:(row)=>Review.isCandidate(row,threshold)}).map((item)=>({...item,reviewCutoff:threshold}));
+  }):Investigation.buildInvestigations(run.rows,{isCandidate:(row)=>Review.isCandidate(row,threshold),slices:sliceSpec}).map((item)=>({...item,reviewCutoff:threshold}));
   const edits=new Map((saved.edits||[]).map(([id,value])=>[id,{...value,episodes:value.episodes.map(episode)}]));
   const dispositions=new Map(saved.dispositions||[]),eventNotes=new Map(saved.eventNotes||[]);
   if([...dispositions.values()].some((value)=>!["important","benign","promoted","excluded"].includes(value)))throw new Error("Invalid analyst disposition.");
+  for(const [key,value] of dispositions){if(value==="excluded")dispositions.delete(key);else if(value==="promoted")dispositions.set(key,"important");}
   const selectedCase=investigations.find((item)=>item.id===saved.caseId);
   const selection=saved.selection;
-  const selectedEpisodes=selectedCase?(edits.get(selectedCase.id)?.episodes||selectedCase.episodes):[];
-  const validSelection=selectedCase&&selection&&(selection.type==="event"?run.rowsById.has(selection.id):selection.type==="episode"&&selectedEpisodes.some((item)=>item.id===selection.id));
-  state.revision++;state.run=run;state.runs=runs;state.rowsById=run.rowsById;state.logs=run.rows.map((row)=>row.raw).join("\n");
+  const validSelection=selectedCase&&selection?.type==="event"&&run.rowsById.has(selection.id);
+  const fallbackSelection=selectedCase?.rows.find((row)=>selectedCase.candidateIds.includes(row.id))||selectedCase?.rows[0];
+  state.revision++;state.run=run;state.runs=runs;state.rowsById=run.rowsById;state.logs=run.rows.map((row)=>row.raw).join("\n");state.cacheKey="";
+  try{sessionStorage.removeItem(ACTIVE_ANALYSIS_POINTER);}catch{}
   state.source=String(saved.source||"Saved investigation");state.synthetic=Boolean(saved.synthetic);state.threshold=threshold;
-  state.activeModel=runs.has(saved.active_model)?saved.active_model:saved.base_model;state.investigations=investigations;state.edits=edits;state.dispositions=dispositions;state.eventNotes=eventNotes;
-  state.caseId=investigations.some((item)=>item.id===saved.caseId)?saved.caseId:null;state.selection=validSelection?selection:selectedEpisodes.length?{type:"episode",id:selectedEpisodes[0].id}:null;
-  state.query=String(saved.query||"");state.account="";state.includeContext=saved.includeContext!==false;state.overviewPage=1;state.episodeLimit=12;state.eventLimits=new Map();
+  state.activeModel=runs.has(saved.active_model)?saved.active_model:saved.base_model;state.investigations=investigations;state.edits=edits;state.dispositions=dispositions;state.eventNotes=eventNotes;state.timeSliceLevel=timeSliceLevel;state.timeSliceCustomized=true;state.sliceSpec=sliceSpec;
+  state.caseId=investigations.some((item)=>item.id===saved.caseId)?saved.caseId:null;state.selection=validSelection?selection:fallbackSelection?{type:"event",id:fallbackSelection.id}:null;
+  state.query=String(saved.query||"");state.account="";state.includeContext=true;state.overviewPage=1;state.timelineLimit=40;state.earlierLimit=12;state.relatedLimit=12;
   for(const [id,cached] of runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:cached.model_name||id,available:false});
-  $("investigation-search").value=state.query;$("investigation-cutoff").value=String(Number((threshold*100).toFixed(5)));
+  $("investigation-search").value=state.query;$("investigation-cutoff").value=String(Number((threshold*100).toFixed(5)));$("time-slice-size").value=String(timeSliceLevel);
   updateCutoffLabel();
-  $("results-title").textContent=state.source;$("run-description").textContent=`${number(run.rows.length)} requests · ${runs.size} saved detector results`;
-  $("run-notice").textContent="Loaded saved results and analyst notes. No detectors were run.";$("run-notice").hidden=false;
+  $("run-notice").textContent="";$("run-notice").hidden=true;
+  $("baseline-content").closest("details").open=false;
   showResults();toast("Investigation restored, including model results and notes.");
 }
 window.LogSession={snapshot:sessionSnapshot,restore:restoreSession};
-function exportReport(){
-  const item=caseById(),edits=editsFor(item),rows=caseRows(item),baseline=state.baseline;
-  const literal=(value)=>String(value).replace(/[\\`*_{}\[\]<>#|]/g,"\\$&");
-  const lines = [
-    "# Investigation report",
-    `Source: ${literal(state.source)}${state.synthetic ? " (synthetic sample)" : ""}`,
-    "",
-    "This reconstruction is an investigative hypothesis. Original model scores and log records are preserved separately from analyst interpretation.",
-    "",
-    "## Who",
-    `- Candidate account: ${literal(accountName(item.account))}`,
-    `- Accounts in retained evidence: ${[...new Set(rows.map((row) => accountName(row.user)))].map(literal).join(", ")}`,
-    `- Sources in retained evidence: ${[...new Set(rows.map((row) => row.ip))].map(literal).join(", ")}`,
-    "",
-    "## What",
-    `${rows.length} retained requests; ${rows.filter((row) => Review.isCandidate(row, caseCutoff(item))).length} meet the ${literal(state.run.model_name)} cutoff. Targets and HTTP responses below are observed records, not inferred application outcomes.`,
-    "",
-    "## When",
-    `Original candidate window: ${shortTime(item.start)} to ${shortTime(item.end)}`,
-    `Retained evidence span: ${rows.length ? `${shortTime(rows[0].time)} to ${shortTime(rows[rows.length - 1].time)}` : "No retained events"}`,
-    "",
-    "## How: reconstructed episodes",
-  ];
+function reportParagraphs(text){
+  return String(text||"").trim().split(/\n\s*\n/).filter(Boolean).map((paragraph)=>`<p>${escapeHTML(paragraph).replace(/\n/g,"<br>")}</p>`).join("");
+}
+function reportLineReferences(rows){
+  const ids=[...new Set(rows.map((row)=>row.id))].sort((a,b)=>a-b),ranges=[];
+  for(let index=0;index<ids.length;){let end=index;while(end+1<ids.length&&ids[end+1]===ids[end]+1)end++;ranges.push(index===end?String(ids[index]):`${ids[index]}–${ids[end]}`);index=end+1;}
+  return ranges.join(", ");
+}
+function reportHTML(){
+  const item=caseById(),edits=editsFor(item),rows=caseRows(item),candidateCount=rows.filter((row)=>Review.isCandidate(row,caseCutoff(item))).length;
+  const sources=[...new Set(rows.map((row)=>row.ip))];
+  if(!sources.length&&item.source)sources.push(item.source);
+  const codeList=(values)=>values.map((value)=>`<code>${escapeHTML(value)}</code>`).join(", ");
+  const defaultAssessment=`<p>This investigation covers ${number(rows.length)} request${rows.length===1?"":"s"} between <code>${escapeHTML(shortTime(rows[0]?.time??item.start))}</code> and <code>${escapeHTML(shortTime(rows[rows.length-1]?.time??item.end))}</code>. ${number(candidateCount)} request${candidateCount===1?"":"s"} met the selected review cutoff.</p><p>The observed requests came from ${codeList(sources)}. The numbered sections below preserve the HTTP methods, endpoints, response codes, and original log records for analyst review.</p>`;
+  const assessment=defaultAssessment+(edits.note.trim()?reportParagraphs(edits.note):"");
+  const sections=[];
+  let sectionNumber=0;
   for(const episode of edits.episodes){
-    const kept=episodeRows(episode);if(!kept.length)continue;
-    lines.push("",`### ${literal(episodeLabel(episode))}${episode.customLabel?" (analyst title)":""}`,`${shortTime(kept[0].time)} to ${shortTime(kept[kept.length-1].time)} · ${kept.length} requests`);
-    for(const row of kept)lines.push(`- Line ${row.id}: ${shortTime(row.time)} · ${literal(actionName(row))} · HTTP ${row.status} · ${literal(row.ip)}${disposition(row)?` · analyst: ${literal(disposition(row))}`:""}${state.eventNotes.get(row.id)?` — Note: ${literal(state.eventNotes.get(row.id))}`:""}`);
+    const kept=episodeRows(episode);if(!kept.length)continue;sectionNumber++;
+    const episodeSources=[...new Set(kept.map((row)=>row.ip))];
+    const statuses=new Map();for(const row of kept)statuses.set(row.status,(statuses.get(row.status)||0)+1);
+    let observed;
+    if(kept.length===1){
+      const row=kept[0];
+      observed=`<p>At <code>${escapeHTML(shortTime(row.time))}</code>, <code>${escapeHTML(row.ip)}</code> issued <code>${escapeHTML(actionName(row))}</code>. The server returned <code>HTTP ${row.status}</code> with ${number(row.bytes)} response bytes.</p>`;
+    }else{
+      const results=[...statuses].map(([status,count])=>`<code>HTTP ${status}</code> for ${number(count)} request${count===1?"":"s"}`).join(", ");
+      observed=`<p>Between <code>${escapeHTML(shortTime(kept[0].time))}</code> and <code>${escapeHTML(shortTime(kept[kept.length-1].time))}</code>, ${codeList(episodeSources)} issued ${number(kept.length)} requests. The recorded responses were ${results}.</p>`;
+    }
+    const notes=kept.filter((row)=>state.eventNotes.get(row.id)).map((row)=>reportParagraphs(state.eventNotes.get(row.id))).join("");
+    sections.push(`<h2>${sectionNumber}. ${escapeHTML(episodeLabel(episode))}</h2>${observed}${notes}<small>Original request${kept.length===1?"":"s"} · line${kept.length===1?"":"s"} ${reportLineReferences(kept)}</small><pre>${kept.map((row)=>escapeHTML(row.raw)).join("\n")}</pre>`);
   }
-  lines.push("","## Earlier-upload comparison","Earlier traffic is not verified normal behavior. All windows and supporting row IDs are given to make comparisons inspectable.",`- Earlier: ${baseline.earlier.length} requests${baseline.earlier.length?` from ${shortTime(baseline.priorStart)} until ${shortTime(item.start)} (exclusive)`:"; no earlier history available"}`,`- Investigation: ${baseline.during.length} requests from ${shortTime(item.start)} through ${shortTime(item.end)}`,`- Observed rates: ${baseline.priorRate===null?"unavailable":baseline.priorRate.toFixed(4)} earlier, ${baseline.caseRate===null?"unavailable":baseline.caseRate.toFixed(4)} investigation requests/minute. Different window lengths can affect this comparison.`,`- Earlier evidence line IDs: ${baseline.earlier.map((row)=>row.id).join(", ")||"none"}`,"","## Model evidence","Detector agreement is not independent confirmation. Models without a run on this upload are not compared.");
-  for(const run of state.runs.values()){
-    const description=window.LogModelLens.describeModel(run),cutoff=run===state.run?caseCutoff():defaultCutoff(run);
-    lines.push("",`### ${literal(run.model_name)}`,literal(description.meaning),`Cutoff: ${cutoff*100} / 100 (${run.detector_score_kind||run.score_kind}).`);
-    for(const baseRow of rows){const row=run.rowsById.get(baseRow.id);if(!row)continue;lines.push(`- Line ${row.id}: ${literal(description.scoreLabel)} ${Number.isFinite(row.raw_score)?row.raw_score:row.score*100}; ${literal(Review.percentileLabel(row,scoreKindFor(run,row)))}; ${Review.isCandidate(row,cutoff)?"meets":"below"} cutoff${row.triage?`; LLM interpretation: ${literal(row.triage)} — ${literal(row.triage_reason||"")}`:""}`);}
+  const firstByActor=new Map();
+  for(const row of rows.filter((entry)=>Review.isCandidate(entry,caseCutoff(item)))){
+    const key=JSON.stringify([row.ip,row.user]);
+    const first=firstByActor.get(key);
+    if(!first||row.time<first.time||(row.time===first.time&&row.id<first.id))firstByActor.set(key,row);
   }
-  lines.push("","## Analyst interpretation",literal(edits.note||"No investigation note supplied."),"","## Exclusions",item.rows.filter((row)=>disposition(row)==="excluded").map((row)=>`Line ${row.id}${state.eventNotes.get(row.id)?`: ${literal(state.eventNotes.get(row.id))}`:""}`).join("\n")||"No excluded events.","","## Supporting raw evidence");
-  for(const row of item.rows){let fenceSize=3;for(const match of row.raw.matchAll(/`+/g))fenceSize=Math.max(fenceSize,match[0].length+1);const fence="`".repeat(fenceSize);lines.push("",`Line ${row.id}${disposition(row)==="excluded"?" (excluded by analyst)":""}`,fence+"text",row.raw,fence);}
-  saveFile(`investigation-${item.id}.md`,lines.join("\n"),"text/markdown;charset=utf-8");toast("Investigation report exported.");
+  const earlier=[...new Map([...firstByActor.values()].flatMap((row)=>earlierFor(row)).map((row)=>[row.id,row])).values()].sort((a,b)=>a.time-b.time||a.id-b.id);
+  const earlierShown=[...new Map([...earlier.slice(-12),...earlier.filter((row)=>state.eventNotes.get(row.id))].map((row)=>[row.id,row])).values()].sort((a,b)=>a.time-b.time||a.id-b.id);
+  const earlierNotes=earlierShown.filter((row)=>state.eventNotes.get(row.id)).map((row)=>reportParagraphs(state.eventNotes.get(row.id))).join("");
+  const earlierSection=earlier.length?`<h2>Earlier requests</h2><p>The uploaded logs contain ${number(earlier.length)} earlier request${earlier.length===1?"":"s"} from the same account and source IP combinations as the candidate requests. These records provide comparison context for the requests above.</p>${earlierNotes}<small>Earlier request${earlierShown.length===1?"":"s"} · line${earlierShown.length===1?"":"s"} ${reportLineReferences(earlierShown)}</small><pre>${earlierShown.map((row)=>escapeHTML(row.raw)).join("\n")}</pre>`:"";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Incident report</title><style>
+body{margin:0;background:#fafaf8;color:#232823;font:17px/1.7 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.report-actions{position:sticky;top:0;z-index:2;display:flex;justify-content:flex-end;max-width:960px;margin:auto;padding:16px 28px}.report-actions button{padding:9px 14px;border:1px solid #8d9491;background:#fff;color:#232823;font:600 14px system-ui,sans-serif;cursor:pointer}main{max-width:960px;margin:auto;padding:28px 28px 56px}h2{font-size:25px;line-height:1.3;margin-top:48px;padding-top:22px;border-top:1px solid #ccd0c8}main>h2:first-child{border-top:0;margin-top:0;padding-top:0}p{max-width:880px}pre{font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;background:#eeefe9;padding:16px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}small{display:block;margin-top:20px;color:#66705f}code{overflow-wrap:anywhere;font:.9em ui-monospace,SFMono-Regular,Menlo,monospace;background:#eeefe9;padding:2px 5px;border-radius:2px}@media print{.report-actions{display:none}main{padding:0}body{font-size:11px}h2{break-after:avoid}pre{break-inside:avoid}}
+</style></head><body><div class="report-actions"><button id="print-report" type="button">Print to PDF</button></div><main><h2>Executive assessment</h2>${assessment}${sections.join("")}${earlierSection}</main></body></html>`;
 }
-function exportRawCSV(){
-  const item=caseById(),episodes=editsFor(item).episodes,episodeByRow=new Map();for(const episode of episodes)for(const row of episode.rows)episodeByRow.set(row.id,episodeLabel(episode));
-  const cell=(value)=>{let text=String(value??"");if(/^[\s]*[=+@-]/.test(text))text="'"+text;return '"'+text.replace(/"/g,'""')+'"';};
-  const lines=[["source_line","timestamp","account","source_ip","method","path","status","response_bytes","episode","analyst_disposition","analyst_note","base_model","base_raw_score","base_rank_or_rule_score","base_cutoff","original_log"]];
-  for(const row of item.rows)lines.push([row.id,row.timestamp,row.user,row.ip,row.method,row.path,row.status,row.bytes,episodeByRow.get(row.id),disposition(row),state.eventNotes.get(row.id),state.run.model,row.raw_score??"",row.score,caseCutoff(item),row.raw]);
-  saveFile(`investigation-${item.id}-records.csv`,"\uFEFF"+lines.map((line)=>line.map(cell).join(",")).join("\r\n"),"text/csv;charset=utf-8");toast("Investigation records exported, including analyst exclusions.");
+function openReport(){
+  const reportWindow=window.open("","_blank");
+  if(!reportWindow){toast("Allow pop-ups to view the report.");return;}
+  reportWindow.document.open();reportWindow.document.write(reportHTML());reportWindow.document.close();
+  reportWindow.document.getElementById("print-report")?.addEventListener("click",()=>reportWindow.print());
+  reportWindow.opener=null;
 }
-function renameEpisode(id,button){
-  const episode=editsFor(caseById()).episodes.find((entry)=>String(entry.id)===String(id));if(!episode)return;
-  const form=document.createElement("form");form.className="episode-rename";
-  const label=document.createElement("label");label.textContent="Analyst episode title";
-  const input=document.createElement("input");input.type="text";input.value=episodeLabel(episode);input.maxLength=180;label.append(input);
-  const save=document.createElement("button");save.className="button secondary";save.textContent="Save title";save.type="submit";
-  const cancel=document.createElement("button");cancel.className="text-button";cancel.textContent="Cancel";cancel.type="button";cancel.addEventListener("click",()=>renderEpisodes());
-  form.append(label,save,cancel);button.closest(".episode-actions").replaceWith(form);input.focus();input.select();
-  form.addEventListener("submit",(event)=>{event.preventDefault();episode.customLabel=input.value.trim()||undefined;editsFor(caseById()).edited=true;renderWorkspace();});
-}
-function mergeEpisode(id){
-  const edits=editsFor(caseById()),visible=visibleEpisodes(),index=visible.findIndex((entry)=>String(entry.id)===String(id));
-  if(index<0||index>=visible.length-1)return;
-  const first=visible[index],second=visible[index+1],all=edits.episodes;
-  const merging=all.slice(all.indexOf(first),all.indexOf(second)+1);
-  const mergedRows=merging.flatMap((episode)=>episode.rows).sort((a,b)=>a.time-b.time||a.id-b.id);
-  const merged={...first,rows:mergedRows,customLabel:first.customLabel||`${actionName(mergedRows[0])} → ${actionName(mergedRows[mergedRows.length-1])}`,start:mergedRows[0].time,end:mergedRows[mergedRows.length-1].time};
-  edits.edited=true;edits.episodes=all.flatMap((episode)=>episode===first?[merged]:merging.includes(episode)?[]:[episode]);state.selection={type:"episode",id:merged.id};renderWorkspace();
-}
-function splitAtEvent(id){
-  const edits=editsFor(caseById()),episode=edits.episodes.find((entry)=>entry.rows.some((row)=>row.id===id));if(!episode)return;
-  const index=episode.rows.findIndex((row)=>row.id===id);if(index<=0)return;
-  const make=(rows,suffix)=>({...episode,id:`${episode.id}-${suffix}-${id}`,rows,label:actionName(rows[0]),customLabel:undefined,start:rows[0].time,end:rows[rows.length-1].time});
-  const first=make(episode.rows.slice(0,index),"a"),second=make(episode.rows.slice(index),"b");
-  edits.edited=true;edits.episodes=edits.episodes.flatMap((entry)=>entry===episode?[first,second]:[entry]);state.selection={type:"event",id};renderWorkspace();
-}
-function promoteExternalContext(row){
-  const item=caseById();if(item.rows.some((entry)=>entry.id===row.id))return;
-  if(!item.addedIds)item.addedIds=new Set();item.addedIds.add(row.id);
+function addImportantRequestToTimeline(row){
+  const item=caseById();
+  if(item.rows.some((entry)=>entry.id===row.id))return false;
+  if(!item.addedIds)item.addedIds=new Set();
+  item.addedIds.add(row.id);
   item.rows.push(row);item.rows.sort((a,b)=>a.time-b.time||a.id-b.id);
-  const episode={id:`promoted-${row.id}`,label:actionName(row),rows:[row],start:row.time,end:row.time};
-  editsFor(item).episodes.push(episode);editsFor(item).episodes.sort((a,b)=>a.rows[0].time-b.rows[0].time);
+  const edits=editsFor(item);
+  edits.edited=true;
+  edits.episodes.push({id:`important-${row.id}`,label:actionName(row),rows:[row],start:row.time,end:row.time});
+  edits.episodes.sort((a,b)=>a.rows[0].time-b.rows[0].time);
+  return true;
 }
 for(const element of document.querySelectorAll("[data-icon]"))element.innerHTML=icon(element.dataset.icon);
 for(const mode of ["file","paste","session"])$("tab-"+mode).addEventListener("click",()=>{routeTo(`/analyze?input=${mode}`);switchInput(mode);});
@@ -647,53 +768,62 @@ function applyCutoff() {
   const threshold=Math.max(0,Math.min(100,value))/100;
   if(threshold===state.threshold){if(pending)renderOverview();return;}
   state.threshold=threshold;state.caseId=null;state.overviewPage=1;
-  rebuildInvestigations();
+  rebuildInvestigations();persistActiveAnalysis();
 }
 $("investigation-cutoff").addEventListener("input",()=>{
   updateCutoffLabel();
   if(cutoffFrame===null)cutoffFrame=requestAnimationFrame(()=>{
     cutoffFrame=null;
-    const count=state.activityChart?.updateThreshold(Number($("investigation-cutoff").value)/100);
-    if(count!==undefined)$("overview-chart-caption").textContent=`${number(count)} candidates in this chart · updating investigations after adjustment`;
+    state.activityChart?.updateThreshold(Number($("investigation-cutoff").value)/100);
   });
   clearTimeout(cutoffTimer);
   cutoffTimer=setTimeout(applyCutoff,250);
 });
 $("investigation-cutoff").addEventListener("change",()=>{updateCutoffLabel();applyCutoff();});
-const confidenceInfo=$("confidence-info"),confidenceHelp=confidenceInfo.parentElement;
-confidenceHelp.addEventListener("mouseenter",()=>confidenceHelp.classList.remove("dismissed"));
-confidenceInfo.addEventListener("focus",()=>confidenceHelp.classList.remove("dismissed"));
-confidenceInfo.addEventListener("click",()=>confidenceHelp.classList.remove("dismissed"));
-confidenceInfo.addEventListener("keydown",(event)=>{if(event.key==="Escape")confidenceHelp.classList.add("dismissed");});
 $("investigation-list").addEventListener("click",(event)=>{const target=event.target.closest("[data-open-case]");if(target)openCase(target.dataset.openCase);});
 $("overview-previous").addEventListener("click",()=>{state.overviewPage--;renderOverview();});
 $("overview-next").addEventListener("click",()=>{state.overviewPage++;renderOverview();});
 $("show-other-traffic").addEventListener("change",renderOverview);
+let timeSliceTimer=null;
+function applyTimeSlice(){
+  clearTimeout(timeSliceTimer);timeSliceTimer=null;
+  if(!state.run)return;
+  const level=Math.max(1,Math.min(TIME_SLICE_TARGETS.length,Number($("time-slice-size").value)||10));
+  if(level===state.timeSliceLevel)return;
+  state.caseId=null;state.overviewPage=1;
+  rebuildInvestigations();persistActiveAnalysis();
+}
+$("time-slice-size").addEventListener("input",()=>{
+  state.timeSliceCustomized=true;
+  clearTimeout(timeSliceTimer);
+  timeSliceTimer=setTimeout(applyTimeSlice,120);
+});
+$("time-slice-size").addEventListener("change",()=>{state.timeSliceCustomized=true;applyTimeSlice();});
 $("back-investigations").addEventListener("click",()=>navigate("investigations"));
-$("include-context").addEventListener("change",()=>{state.includeContext=$("include-context").checked;renderEpisodes();});
-$("restore-events").addEventListener("click",()=>{for(const row of caseById().rows)if(disposition(row)==="excluded")state.dispositions.delete(dispositionKey(row));renderWorkspace();});
 $("add-investigation-note").addEventListener("input",()=>{editsFor(caseById()).note=$("add-investigation-note").value;$("investigation-notes").textContent="Note kept in this session and included in the report.";});
 $("investigation-workspace").addEventListener("click",(event)=>{
-  if(event.target.closest("[data-open-baseline]")){const panel=$("baseline-content").closest("details");panel.open=true;panel.scrollIntoView({block:"start"});return;}
   const selected=event.target.closest("[data-select-event]");if(selected){selectEvent(Number(selected.dataset.selectEvent));return;}
-  const episode=event.target.closest("[data-select-episode]");if(episode){const found=editsFor(caseById()).episodes.find((entry)=>String(entry.id)===episode.dataset.selectEpisode);state.selection={type:"episode",id:found.id};renderEpisodes();renderEvidence();revealSelection();return;}
-  const rename=event.target.closest("[data-rename-episode]");if(rename){renameEpisode(rename.dataset.renameEpisode,rename);return;}
-  const merge=event.target.closest("[data-merge-episode]");if(merge){mergeEpisode(merge.dataset.mergeEpisode);return;}
-  const split=event.target.closest("[data-split-event]");if(split){splitAtEvent(Number(split.dataset.splitEvent));return;}
-  const more=event.target.closest("[data-more-events]");if(more){const id=more.dataset.moreEvents;state.eventLimits.set(id,(state.eventLimits.get(id)||30)+30);renderEpisodes();const node=Array.from($("episode-list").querySelectorAll("[data-episode]")).find((entry)=>entry.dataset.episode===id);if(node)node.open=true;return;}
-  if(event.target.closest("[data-more-episodes]")){state.episodeLimit+=12;renderEpisodes();return;}
-  const lens=event.target.closest("[data-lens]");if(lens&&!state.modelBusy){state.activeModel=lens.dataset.lens;$("model-run-status").textContent="";renderModelEvidence();return;}
-  if(event.target.closest("#run-evidence-model"))runEvidenceModel();
+  if(event.target.closest("[data-more-earlier]")){state.earlierLimit+=20;renderBaseline();return;}
+  if(event.target.closest("[data-more-related]")){
+    state.relatedLimit+=20;
+    const history=relatedHistory(selectedRows()[0]),details=$("evidence-content").querySelector(".evidence-section");
+    details.querySelector(".related-events").innerHTML=relatedButtons(history.slice(0,state.relatedLimit));
+    const more=details.querySelector("[data-more-related]");
+    if(history.length>state.relatedLimit)more.textContent=`Show ${number(Math.min(20,history.length-state.relatedLimit))} more requests`;
+    else more.remove();
+    return;
+  }
+  if(event.target.closest("[data-more-requests]")){state.timelineLimit+=40;renderTimeline();return;}
 });
 $("evidence-workspace").addEventListener("change",(event)=>{
   if(event.target.id!=="event-disposition"||state.selection?.type!=="event")return;
   const row=state.rowsById.get(state.selection.id),value=event.target.value;
   if(value)state.dispositions.set(dispositionKey(row),value);else state.dispositions.delete(dispositionKey(row));
-  if(["promoted","important"].includes(value))promoteExternalContext(row);
+  const added=value==="important"&&addImportantRequestToTimeline(row);
   renderWorkspace();
+  if(added){revealSelection();toast("Request added to the timeline.");}
 });
 $("evidence-workspace").addEventListener("input",(event)=>{if(event.target.id==="event-note"&&state.selection?.type==="event")state.eventNotes.set(state.selection.id,event.target.value);});
-$("evidence-model").addEventListener("change",()=>{state.activeModel=$("evidence-model").value;$("model-run-status").textContent="";renderModelEvidence();});
 $("save-session").addEventListener("click",async()=>{
   if(!state.run||state.modelBusy||state.busy||$("save-session").disabled)return;
   if(cutoffTimer!==null)applyCutoff();
@@ -721,11 +851,15 @@ $("session-file").addEventListener("change",async()=>{
   }catch(error){showError("page-error",`Could not open saved investigation: ${error.message}`);}
   finally{state.reading=false;syncControls();}
 });
-$("export-investigation").addEventListener("click",exportReport);
-$("export-investigation-csv").addEventListener("click",exportRawCSV);
+$("view-report").addEventListener("click",openReport);
 window.addEventListener("resize",()=>{clearTimeout(state.resizeTimer);state.resizeTimer=setTimeout(()=>{if(state.run&&!$("results-panel").hidden){if(state.caseId)renderModelEvidence();else renderOverview();}},150);});
+$("time-slice-size").value="10";
 renderRoute();
 (async()=>{
-  try{const status=await api("/api/status");state.models=status.models.filter((model)=>model.id!=="rules"&&model.available);for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});state.ready=true;renderModels();syncControls();}
-  catch(error){showError("analyze-error",error.message);}
+  try{
+    const status=await api("/api/status");state.models=status.models.filter((model)=>model.id!=="rules"&&model.available);state.ready=true;
+  }catch(error){showError("analyze-error",error.message);}
+  try{await restoreActiveAnalysis();}catch{}
+  for(const [id,run] of state.runs)if(!state.models.some((model)=>model.id===id))state.models.push({id,name:run.model_name||id,available:false});
+  renderModels();renderRoute();syncControls();
 })();

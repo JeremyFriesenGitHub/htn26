@@ -155,8 +155,8 @@ Open **http://127.0.0.1:8765** for the log-review dashboard. Python 3.9+ is enou
 explore the included synthetic sample; no frontend build or additional packages
 are needed. Use `--port 8766` to choose another port.
 
-The home and investigation overview is at `/`, log input at `/analyze`, and model
-methodology and benchmarks at `/models`. Individual investigations use
+The homepage is at `/`, the investigation overview at `/investigations`, log
+input at `/analyze`, and model methodology and benchmarks at `/models`. Individual investigations use
 `/investigations/<id>`. Browser Back and Forward preserve the active in-memory
 analysis; after a page reload or in a new tab, load a saved investigation to restore
 its records and notes. The local server and Vercel build both serve these routes.
@@ -164,8 +164,8 @@ its records and notes. The local server and Vercel build both serve these routes
 - Upload a `.log` / `.txt` file, drag and drop it, or paste Apache Common or
   Combined Log Format lines. There is no application-level file-size or total-line
   limit; available memory determines how large a batch can be processed.
-- Start with **Investigations found**, grouped by authenticated account across IP
-  changes (anonymous traffic groups by IP) and gaps of no more than 30 minutes.
+- Start with candidate investigations grouped by source IP and gaps of no more
+  than 30 minutes, including requests under different usernames at that IP.
   A red-only overview chart locates candidates; other traffic is optional.
 - Open an investigation for its chronological episodes and a linked evidence
   workspace. Episode labels use literal request methods and paths, not inferred
@@ -178,8 +178,8 @@ its records and notes. The local server and Vercel build both serve these routes
 - Use **Save investigation data** to download original records, cached model
   results, timeline edits and notes as a portable `.json.gz` file. **Load saved investigation** on the Analyze page restores that save without rerunning detectors; plain JSON
   saves are also supported.
-- Rename, merge, or split episodes; annotate events; mark them important or
-  benign; remove/restore events or promote history into the reconstruction.
+- Annotate requests and mark them important or benign. Marking an earlier request
+  important adds it to the investigation timeline.
   Edits last for this browser session and are included in exported reports.
 - Export an investigation report with Who / What / When / How, model evidence,
   analyst interpretation, and original records. Raw CSV remains available.
