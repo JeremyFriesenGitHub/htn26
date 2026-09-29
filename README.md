@@ -1,12 +1,16 @@
-# trace.cooking — Log anomaly detection using Unsupervised Learning
+# Trace
 
-Unsupervised detection of a security incident hidden in 180,800 Apache access-log lines
-(Aug 2025 – Mar 2026), a rigorous comparison of detector architectures against blind LLM
-baselines, and an interactive console for scoring new logs.
+**1st Place, CSE "Log & Order," Hack the North 2026 🏆**
 
-## Final report
+Trace is an AI-assisted security investigation platform that detects anomalous activity
+in access logs, groups related events into incidents, and helps analysts understand what
+happened.
 
-The completed investigation for the challenge is available in the [Evidence Report](https://trace.cooking/final_htn26_report). It reconstructs the incident from the detected anomalies and the surrounding HTTP requests.
+It uncovered a hidden 22-event, multi-stage attack across 180,800 unlabeled Apache log
+entries, achieving **0.918 PR-AUC** and reducing false positives to **zero** with
+detector-guided LLM triage.
+
+[View on Devpost](https://devpost.com/software/loggr)
 
 ## The problem
 The log has 7 informative fields (IP, user, timestamp, method, path, status, bytes). One
